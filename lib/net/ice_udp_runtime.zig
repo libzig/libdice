@@ -82,12 +82,24 @@ pub const TurnMaintenanceSummary = struct {
     permission_refreshes_sent: usize,
     channel_refreshes_sent: usize,
     backoff_skipped_bindings: usize,
+    max_backoff_until_ms: u64,
+    max_error_streak: u8,
+    last_error_code_seen: ?u16,
     permissions_pruned: usize,
     channels_pruned: usize,
 
     pub fn total_sent(self: TurnMaintenanceSummary) usize {
         return self.allocations_requested + self.allocation_refreshes_sent + self.permission_refreshes_sent + self.channel_refreshes_sent;
     }
+};
+
+pub const TurnBindingDiagnostic = struct {
+    stream_id: u32,
+    component_id: u16,
+    auth_retry_required: bool,
+    last_error_code: ?u16,
+    non_retryable_error_streak: u8,
+    maintenance_backoff_until_ms: u64,
 };
 
 pub const IoTickOptions = struct {
@@ -850,11 +862,18 @@ pub const IceUdpRuntimeBridge = struct {
             .permission_refreshes_sent = 0,
             .channel_refreshes_sent = 0,
             .backoff_skipped_bindings = 0,
+            .max_backoff_until_ms = 0,
+            .max_error_streak = 0,
+            .last_error_code_seen = null,
             .permissions_pruned = 0,
             .channels_pruned = 0,
         };
 
         for (self.turn_bindings.items) |*binding| {
+            summary.max_backoff_until_ms = @max(summary.max_backoff_until_ms, binding.maintenance_backoff_until_ms);
+            summary.max_error_streak = @max(summary.max_error_streak, binding.non_retryable_error_streak);
+            if (binding.socket.latest_error_code()) |code| summary.last_error_code_seen = code;
+
             if (now_ms < binding.maintenance_backoff_until_ms) {
                 summary.backoff_skipped_bindings += 1;
                 continue;
@@ -938,6 +957,24 @@ pub const IceUdpRuntimeBridge = struct {
         }
 
         return summary;
+    }
+
+    pub fn collect_turn_binding_diagnostics(self: *IceUdpRuntimeBridge, out: []TurnBindingDiagnostic) usize {
+        var count: usize = 0;
+        for (self.turn_bindings.items) |binding| {
+            if (count < out.len) {
+                out[count] = .{
+                    .stream_id = binding.stream_id,
+                    .component_id = binding.component_id,
+                    .auth_retry_required = binding.socket.has_auth_retry_required(),
+                    .last_error_code = binding.socket.latest_error_code(),
+                    .non_retryable_error_streak = binding.non_retryable_error_streak,
+                    .maintenance_backoff_until_ms = binding.maintenance_backoff_until_ms,
+                };
+            }
+            count += 1;
+        }
+        return count;
     }
 
     const TurnDrainSummary = struct {
@@ -2670,10 +2707,21 @@ test "udp bridge applies bounded backoff after non-retryable TURN errors" {
     });
     try std.testing.expectEqual(@as(usize, 0), early.allocations_requested);
     try std.testing.expectEqual(@as(usize, 1), early.backoff_skipped_bindings);
+    try std.testing.expect(early.max_backoff_until_ms > 500);
+    try std.testing.expectEqual(@as(u8, 1), early.max_error_streak);
+    try std.testing.expectEqual(@as(?u16, 500), early.last_error_code_seen);
 
     const late = try bridge.run_turn_maintenance(prng.random(), 1_020, &packet_buf, .{
         .allocate_if_missing = true,
         .allocate_options = .{ .username = "u" },
     });
     try std.testing.expectEqual(@as(usize, 1), late.allocations_requested);
+
+    var diags: [2]TurnBindingDiagnostic = undefined;
+    const diag_count = bridge.collect_turn_binding_diagnostics(&diags);
+    try std.testing.expectEqual(@as(usize, 1), diag_count);
+    try std.testing.expectEqual(stream_id, diags[0].stream_id);
+    try std.testing.expectEqual(@as(u16, 1), diags[0].component_id);
+    try std.testing.expectEqual(@as(?u16, 500), diags[0].last_error_code);
+    try std.testing.expect(diags[0].non_retryable_error_streak >= 1);
 }
