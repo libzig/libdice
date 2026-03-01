@@ -136,6 +136,8 @@ pub const net_parse_ip_port = @import("net/address.zig").parse_ip_port;
 pub const UdpSocket = @import("net/udp_socket.zig").UdpSocket;
 pub const UdpDispatch = @import("net/udp_dispatch.zig").UdpDispatch;
 pub const UdpReceivedPacket = @import("net/udp_dispatch.zig").ReceivedPacket;
+pub const TcpCandidateStream = @import("net/tcp_candidate_socket.zig").TcpStream;
+pub const TcpCandidateListener = @import("net/tcp_candidate_socket.zig").TcpListener;
 pub const TurnUdpSocket = @import("net/turn_socket_udp.zig").TurnUdpSocket;
 pub const TurnUdpReceivedPacket = @import("net/turn_socket_udp.zig").ReceivedPacket;
 pub const TurnUdpPermission = @import("net/turn_socket_udp.zig").Permission;
@@ -674,4 +676,20 @@ test "turn tcp framing exports are reachable" {
         .stun => |view| try std.testing.expectEqual(@as(u16, 0x0101), view.header.message_type),
         else => return error.UnexpectedPacketType,
     }
+}
+
+test "tcp candidate socket exports are reachable" {
+    var listener = try TcpCandidateListener.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, 4);
+    defer listener.deinit();
+
+    var stream = try TcpCandidateStream.connect_nonblocking(listener.local_address());
+    defer stream.deinit();
+
+    var accepted: ?TcpCandidateStream = null;
+    var i: usize = 0;
+    while (i < 200 and accepted == null) : (i += 1) {
+        accepted = try listener.accept_nonblocking();
+    }
+    try std.testing.expect(accepted != null);
+    accepted.?.deinit();
 }
