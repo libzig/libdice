@@ -69,7 +69,7 @@ test "pair builder creates cross product per component" {
     try stream.add_component(2);
 
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, .{}, .{});
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, .{}, .{}, .regular);
     defer runtime.deinit();
 
     const a1: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 1 }, .port = 5000 } };
@@ -150,7 +150,7 @@ test "pair builder is idempotent with same candidate sets" {
     try stream.add_component(1);
 
     const component_ids = [_]u16{1};
-    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 2, &component_ids, .{}, .{});
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 2, &component_ids, .{}, .{}, .regular);
     defer runtime.deinit();
 
     const addr_l: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 1 }, .port = 5000 } };

@@ -5,6 +5,7 @@ const stream_connectivity = @import("stream_connectivity.zig");
 const pair_builder = @import("pair_builder.zig");
 const conncheck = @import("conncheck.zig");
 const consent = @import("consent.zig");
+const nomination = @import("nomination.zig");
 const parser = @import("../protocol/stun/parser.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
 
@@ -39,6 +40,7 @@ pub const IceRuntime = struct {
     agent: *agent_mod.Agent,
     retry_policy: transaction.RetryPolicy,
     consent_config: consent.ConsentConfig,
+    nomination_mode: nomination.NominationMode,
     entries: std.ArrayList(RuntimeEntry),
 
     pub fn init(
@@ -46,12 +48,14 @@ pub const IceRuntime = struct {
         agent: *agent_mod.Agent,
         retry_policy: transaction.RetryPolicy,
         consent_config: consent.ConsentConfig,
+        nomination_mode: nomination.NominationMode,
     ) IceRuntime {
         return .{
             .allocator = allocator,
             .agent = agent,
             .retry_policy = retry_policy,
             .consent_config = consent_config,
+            .nomination_mode = nomination_mode,
             .entries = .empty,
         };
     }
@@ -91,6 +95,7 @@ pub const IceRuntime = struct {
             component_ids,
             self.retry_policy,
             self.consent_config,
+            self.nomination_mode,
         );
 
         try self.entries.append(self.allocator, .{
@@ -239,7 +244,7 @@ test "ice runtime attach populate and response flow" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .aggressive);
     defer runtime.deinit();
 
     try std.testing.expect(try runtime.attach_stream(stream_id));
@@ -280,7 +285,7 @@ test "ice runtime trickle remote candidate expansion" {
         .address = local_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
 
@@ -364,7 +369,7 @@ test "ice runtime timeout aggregation across streams" {
         .address = remote_2,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{}, .regular);
     defer runtime.deinit();
 
     try std.testing.expect(try runtime.attach_stream(s1));
@@ -410,7 +415,7 @@ test "ice runtime restart stream reinitializes pipeline" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
 
@@ -458,6 +463,7 @@ test "ice runtime consent ticking aggregates component failures" {
         &agent,
         .{},
         .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 },
+        .regular,
     );
     defer runtime.deinit();
 

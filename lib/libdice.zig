@@ -14,6 +14,7 @@ pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairCon
 pub const ConsentConfig = @import("core/consent.zig").ConsentConfig;
 pub const ConsentState = @import("core/consent.zig").ConsentState;
 pub const ConsentTracker = @import("core/consent.zig").ConsentTracker;
+pub const NominationMode = @import("core/nomination.zig").NominationMode;
 pub const StreamConnectivityRuntime = @import("core/stream_connectivity.zig").StreamConnectivityRuntime;
 pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCheck;
 pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
@@ -159,7 +160,7 @@ test "connectivity check tracker export is reachable" {
 }
 
 test "component connectivity engine export is reachable" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, StunRetryPolicy{}, .{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, StunRetryPolicy{}, .{}, .regular);
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -186,7 +187,7 @@ test "component connectivity engine export is reachable" {
 
 test "stream connectivity runtime export is reachable" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, StunRetryPolicy{}, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, StunRetryPolicy{}, .{}, .regular);
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -236,7 +237,7 @@ test "pair builder exports are reachable" {
     }));
 
     const component_ids = [_]u16{1};
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 77, &component_ids, StunRetryPolicy{}, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 77, &component_ids, StunRetryPolicy{}, .{}, .regular);
     defer runtime.deinit();
 
     const summary: PairBuildSummary = try populate_stream_checklists(&stream, &runtime, true, 9000);
@@ -270,7 +271,7 @@ test "ice runtime exports are reachable" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, StunRetryPolicy{}, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, StunRetryPolicy{}, .{}, .regular);
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
     _ = try runtime.populate_stream_checklists(stream_id, true, 10000);

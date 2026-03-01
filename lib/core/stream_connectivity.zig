@@ -4,6 +4,7 @@ const checklist = @import("checklist.zig");
 const conncheck = @import("conncheck.zig");
 const consent = @import("consent.zig");
 const component = @import("component.zig");
+const nomination = @import("nomination.zig");
 const parser = @import("../protocol/stun/parser.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
 
@@ -28,6 +29,7 @@ pub const StreamConnectivityRuntime = struct {
         component_ids: []const u16,
         retry_policy: transaction.RetryPolicy,
         consent_config: consent.ConsentConfig,
+        nomination_mode: nomination.NominationMode,
     ) !StreamConnectivityRuntime {
         var engines = std.ArrayList(connectivity_engine.ComponentConnectivityEngine).empty;
         errdefer {
@@ -42,6 +44,7 @@ pub const StreamConnectivityRuntime = struct {
                 component_id,
                 retry_policy,
                 consent_config,
+                nomination_mode,
             ));
         }
 
@@ -179,7 +182,7 @@ pub const StreamConnectivityRuntime = struct {
 
 test "stream connectivity runtime handles per-component checks" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 10, &component_ids, .{}, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 10, &component_ids, .{}, .{}, .aggressive);
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -224,7 +227,7 @@ test "stream connectivity runtime handles per-component checks" {
 
 test "stream connectivity runtime start_next_check_any uses first available" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 20, &component_ids, .{}, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 20, &component_ids, .{}, .{}, .regular);
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -245,7 +248,7 @@ test "stream connectivity runtime start_next_check_any uses first available" {
 
 test "stream connectivity runtime timeout aggregation" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 30, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 30, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{}, .regular);
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -280,7 +283,7 @@ test "stream connectivity runtime timeout aggregation" {
 
 test "stream connectivity runtime restart clears engines" {
     const component_ids = [_]u16{1};
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 40, &component_ids, .{}, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 40, &component_ids, .{}, .{}, .regular);
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -311,6 +314,7 @@ test "stream connectivity runtime consent probing and failure tick" {
         &component_ids,
         .{},
         .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 },
+        .regular,
     );
     defer runtime.deinit();
 
