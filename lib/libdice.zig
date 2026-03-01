@@ -6,6 +6,7 @@ pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
 pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
+pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
 
 pub const version = "0.0.1";
 
@@ -45,4 +46,9 @@ test "stun header export is reachable" {
     const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
     const header = StunHeader.init(0x0001, 0, tx_id);
     try std.testing.expectEqual(@as(u16, 0x0001), header.message_type);
+}
+
+test "stun attr header export is reachable" {
+    const attr = StunAttrHeader.init(0x0006, 5);
+    try std.testing.expectEqual(@as(u16, 0x0006), attr.attr_type);
 }
