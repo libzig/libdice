@@ -102,6 +102,19 @@ pub const TurnBindingDiagnostic = struct {
     maintenance_backoff_until_ms: u64,
 };
 
+pub const TurnMaintenanceStatus = struct {
+    stream_id: u32,
+    component_id: u16,
+    has_allocation: bool,
+    allocation_expires_at_ms: u64,
+    permission_count: usize,
+    channel_count: usize,
+    auth_retry_required: bool,
+    last_error_code: ?u16,
+    non_retryable_error_streak: u8,
+    maintenance_backoff_until_ms: u64,
+};
+
 pub const IoTickOptions = struct {
     max_starts_per_tick: usize = 8,
     outbound_options: OutboundCheckOptions = .{},
@@ -999,6 +1012,28 @@ pub const IceUdpRuntimeBridge = struct {
                 out[count] = .{
                     .stream_id = binding.stream_id,
                     .component_id = binding.component_id,
+                    .auth_retry_required = binding.socket.has_auth_retry_required(),
+                    .last_error_code = binding.socket.latest_error_code(),
+                    .non_retryable_error_streak = binding.non_retryable_error_streak,
+                    .maintenance_backoff_until_ms = binding.maintenance_backoff_until_ms,
+                };
+            }
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn collect_turn_maintenance_status(self: *IceUdpRuntimeBridge, out: []TurnMaintenanceStatus) usize {
+        var count: usize = 0;
+        for (self.turn_bindings.items) |binding| {
+            if (count < out.len) {
+                out[count] = .{
+                    .stream_id = binding.stream_id,
+                    .component_id = binding.component_id,
+                    .has_allocation = binding.socket.allocation != null,
+                    .allocation_expires_at_ms = if (binding.socket.allocation) |lease| lease.expires_at_ms else 0,
+                    .permission_count = binding.socket.permission_count(),
+                    .channel_count = binding.socket.channel_binding_count(),
                     .auth_retry_required = binding.socket.has_auth_retry_required(),
                     .last_error_code = binding.socket.latest_error_code(),
                     .non_retryable_error_streak = binding.non_retryable_error_streak,
@@ -2759,4 +2794,48 @@ test "udp bridge applies bounded backoff after non-retryable TURN errors" {
     try std.testing.expectEqual(@as(u16, 1), diags[0].component_id);
     try std.testing.expectEqual(@as(?u16, 500), diags[0].last_error_code);
     try std.testing.expect(diags[0].non_retryable_error_streak >= 1);
+}
+
+test "udp bridge snapshots TURN maintenance status without ticking" {
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(
+        stream_id,
+        1,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    binding.socket.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 120,
+        .expires_at_ms = 55_000,
+    };
+    const peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 120 }, .port = 4000 } };
+    try binding.socket.set_permission(peer, 1_000, 300);
+    try binding.socket.set_channel_binding(0x4011, peer, 1_000, 600);
+    binding.non_retryable_error_streak = 2;
+    binding.maintenance_backoff_until_ms = 9_000;
+
+    var status: [2]TurnMaintenanceStatus = undefined;
+    const count = bridge.collect_turn_maintenance_status(&status);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(stream_id, status[0].stream_id);
+    try std.testing.expectEqual(@as(u16, 1), status[0].component_id);
+    try std.testing.expect(status[0].has_allocation);
+    try std.testing.expectEqual(@as(u64, 55_000), status[0].allocation_expires_at_ms);
+    try std.testing.expectEqual(@as(usize, 1), status[0].permission_count);
+    try std.testing.expectEqual(@as(usize, 1), status[0].channel_count);
+    try std.testing.expectEqual(@as(u8, 2), status[0].non_retryable_error_streak);
+    try std.testing.expectEqual(@as(u64, 9_000), status[0].maintenance_backoff_until_ms);
 }

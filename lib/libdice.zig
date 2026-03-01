@@ -149,6 +149,7 @@ pub const IceUdpBidirectionalAdvanceSummary = @import("net/ice_udp_runtime.zig")
 pub const IceUdpTurnMaintenanceOptions = @import("net/ice_udp_runtime.zig").TurnMaintenanceOptions;
 pub const IceUdpTurnMaintenanceSummary = @import("net/ice_udp_runtime.zig").TurnMaintenanceSummary;
 pub const IceUdpTurnBindingDiagnostic = @import("net/ice_udp_runtime.zig").TurnBindingDiagnostic;
+pub const IceUdpTurnMaintenanceStatus = @import("net/ice_udp_runtime.zig").TurnMaintenanceStatus;
 pub const IceUdpIoTickOptions = @import("net/ice_udp_runtime.zig").IoTickOptions;
 pub const IceUdpIoTickSummary = @import("net/ice_udp_runtime.zig").IoTickSummary;
 pub const IceUdpIoTickWithEventsSummary = @import("net/ice_udp_runtime.zig").IoTickWithEventsSummary;
