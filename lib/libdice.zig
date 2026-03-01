@@ -10,6 +10,9 @@ pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
 pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
 pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
 pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
+pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
+pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
+pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
 
 pub const version = "0.0.1";
 
@@ -73,4 +76,12 @@ test "stun builder export is reachable" {
     var builder = try StunMessageBuilder.init(&packet, 0x0001, tx_id);
     const bytes = try builder.finish();
     try std.testing.expectEqual(@as(usize, 20), bytes.len);
+}
+
+test "stun transaction exports are reachable" {
+    var prng = std.Random.DefaultPrng.init(1234);
+    const random = prng.random();
+
+    const tx = stun_tx_from_rng(random);
+    try std.testing.expect(stun_tx_equals(tx, tx));
 }
