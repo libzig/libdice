@@ -133,6 +133,14 @@ pub const ComponentConnectivityEngine = struct {
             self.component.mark_failed();
         }
     }
+
+    pub fn reset_for_restart(self: *ComponentConnectivityEngine) !void {
+        self.checklist.clear();
+        self.tracker.clear();
+        self.pair_contexts.clearRetainingCapacity();
+        self.component.reset();
+        try self.start_connecting();
+    }
 };
 
 test "connectivity engine success path selects pair" {
@@ -261,4 +269,29 @@ test "connectivity engine uses triggered queue first" {
     const view = try parser.parse_message(&packet);
     const completed = try engine.on_response(view, 10);
     try std.testing.expectEqual(@as(u64, 400), completed.meta.candidate_pair_id);
+}
+
+test "connectivity engine restart clears state and re-enters connecting" {
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 5, 1, .{});
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 500,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = true });
+
+    var prng = std.Random.DefaultPrng.init(9);
+    _ = try engine.start_next_check(prng.random(), 0);
+    try std.testing.expectEqual(@as(usize, 1), engine.checklist.pair_count());
+    try std.testing.expectEqual(@as(usize, 1), engine.tracker.pending_count());
+
+    try engine.reset_for_restart();
+    try std.testing.expectEqual(component_mod.ComponentState.connecting, engine.component.state);
+    try std.testing.expectEqual(@as(usize, 0), engine.checklist.pair_count());
+    try std.testing.expectEqual(@as(usize, 0), engine.tracker.pending_count());
 }

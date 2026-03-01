@@ -19,6 +19,7 @@ pub const populate_stream_checklists = @import("core/pair_builder.zig").populate
 pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
 pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
 pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
+pub const IceRuntimeRestartSummary = @import("core/ice_runtime.zig").RestartSummary;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -279,6 +280,9 @@ test "ice runtime exports are reachable" {
     _ = try header.encode(&packet);
     const view = try parse_stun_message(&packet);
     _ = try runtime.on_response(started.stream_id, started.component_id, view, 10);
+
+    const restarted: IceRuntimeRestartSummary = try runtime.restart_stream(stream_id, true, 11000);
+    try std.testing.expectEqual(stream_id, restarted.stream_id);
 }
 
 test "checklist exports are reachable" {

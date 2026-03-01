@@ -122,6 +122,10 @@ pub const CandidateList = struct {
         return self.items.items.len;
     }
 
+    pub fn clear(self: *CandidateList) void {
+        self.items.clearRetainingCapacity();
+    }
+
     pub fn add(self: *CandidateList, candidate: Candidate) !bool {
         for (self.items.items) |existing| {
             if (Candidate.semantically_equal(existing, candidate)) return false;
@@ -184,4 +188,23 @@ test "candidate list deduplicates semantic duplicates" {
     try std.testing.expect(try list.add(c1));
     try std.testing.expect(!(try list.add(c2)));
     try std.testing.expectEqual(@as(usize, 1), list.count());
+}
+
+test "candidate list clear retains allocation and empties items" {
+    var list = CandidateList.init(std.testing.allocator);
+    defer list.deinit();
+
+    const address: Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 10 }, .port = 3478 } };
+    try std.testing.expect(try list.add(.{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = compute_foundation(.udp, .host, address),
+        .priority = compute_candidate_priority(.host, 1, 1),
+        .address = address,
+    }));
+
+    list.clear();
+    try std.testing.expectEqual(@as(usize, 0), list.count());
 }

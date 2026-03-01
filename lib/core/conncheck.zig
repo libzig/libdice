@@ -57,6 +57,11 @@ pub const ConnectivityCheckTracker = struct {
         return self.contexts.count();
     }
 
+    pub fn clear(self: *ConnectivityCheckTracker) void {
+        self.contexts.clearRetainingCapacity();
+        self.tx_store.map.clearRetainingCapacity();
+    }
+
     pub fn start_check(self: *ConnectivityCheckTracker, transaction_id: transaction.TransactionId, now_ms: u64, user_tag: u64, meta: CheckMeta) !void {
         try self.tx_store.start(transaction_id, now_ms, user_tag);
         try self.contexts.put(transaction_id, .{
@@ -189,5 +194,19 @@ test "connectivity check tracker cancel removes pending" {
     const tx_id = [_]u8{ 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31 };
     try tracker.start_check(tx_id, 0, 99, .{ .stream_id = 3, .component_id = 1, .candidate_pair_id = 5 });
     try std.testing.expect(tracker.cancel_check(tx_id));
+    try std.testing.expectEqual(@as(usize, 0), tracker.pending_count());
+}
+
+test "connectivity check tracker clear resets all pending state" {
+    var tracker = ConnectivityCheckTracker.init(std.testing.allocator, .{});
+    defer tracker.deinit();
+
+    const a = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const b = [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    try tracker.start_check(a, 0, 1, .{ .stream_id = 1, .component_id = 1, .candidate_pair_id = 10 });
+    try tracker.start_check(b, 0, 2, .{ .stream_id = 1, .component_id = 1, .candidate_pair_id = 11 });
+
+    try std.testing.expectEqual(@as(usize, 2), tracker.pending_count());
+    tracker.clear();
     try std.testing.expectEqual(@as(usize, 0), tracker.pending_count());
 }

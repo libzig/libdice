@@ -58,6 +58,11 @@ pub const Checklist = struct {
         return self.pairs.items.len;
     }
 
+    pub fn clear(self: *Checklist) void {
+        self.pairs.clearRetainingCapacity();
+        self.triggered_queue.clearRetainingCapacity();
+    }
+
     pub fn get_pair(self: *Checklist, pair_id: u64) ?*Pair {
         for (self.pairs.items) |*pair| {
             if (pair.id == pair_id) return pair;
@@ -301,4 +306,23 @@ test "checklist unique pair insertion by candidate ids" {
     })));
 
     try std.testing.expectEqual(@as(usize, 1), checklist.pair_count());
+}
+
+test "checklist clear resets pair and triggered queues" {
+    var checklist = Checklist.init(std.testing.allocator);
+    defer checklist.deinit();
+
+    try checklist.add_pair(.{
+        .id = 1,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 1,
+        .component_id = 1,
+        .state = .waiting,
+    });
+    try checklist.queue_triggered(1);
+
+    checklist.clear();
+    try std.testing.expectEqual(@as(usize, 0), checklist.pair_count());
+    try std.testing.expectEqual(@as(?*Pair, null), checklist.pop_next_triggered());
 }

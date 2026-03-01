@@ -88,6 +88,12 @@ pub const StreamConnectivityRuntime = struct {
         }
     }
 
+    pub fn reset_for_restart(self: *StreamConnectivityRuntime) !void {
+        for (self.engines.items) |*engine| {
+            try engine.reset_for_restart();
+        }
+    }
+
     pub fn start_next_check_for_component(
         self: *StreamConnectivityRuntime,
         component_id: u16,
@@ -252,4 +258,29 @@ test "stream connectivity runtime timeout aggregation" {
     const timed_out_count = try runtime.expire_timeouts_all(349, &out);
     try std.testing.expectEqual(@as(usize, 1), timed_out_count);
     try std.testing.expectEqual(@as(u16, 1), out[0].component_id);
+}
+
+test "stream connectivity runtime restart clears engines" {
+    const component_ids = [_]u16{1};
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 40, &component_ids, .{});
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 500,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 100,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(14);
+    _ = try runtime.start_next_check_for_component(1, prng.random(), 0);
+    try std.testing.expectEqual(@as(usize, 1), runtime.get_engine(1).?.tracker.pending_count());
+
+    try runtime.reset_for_restart();
+    try std.testing.expectEqual(component.ComponentState.connecting, try runtime.component_state(1));
+    try std.testing.expectEqual(@as(usize, 0), runtime.get_engine(1).?.tracker.pending_count());
+    try std.testing.expectEqual(@as(usize, 0), runtime.get_engine(1).?.checklist.pair_count());
 }

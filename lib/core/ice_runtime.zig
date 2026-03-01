@@ -19,6 +19,11 @@ pub const TimedOutCheck = struct {
     timed_out: conncheck.TimedOutCheck,
 };
 
+pub const RestartSummary = struct {
+    stream_id: u32,
+    pair_summary: pair_builder.PairBuildSummary,
+};
+
 const RuntimeEntry = struct {
     stream_id: u32,
     runtime: stream_connectivity.StreamConnectivityRuntime,
@@ -103,6 +108,17 @@ pub const IceRuntime = struct {
         const entry = self.find_entry(stream_id) orelse return error.NotFound;
         const stream = self.agent.get_stream(stream_id) orelse return error.NotFound;
         return pair_builder.populate_stream_checklists(stream, &entry.runtime, controlling, start_pair_id);
+    }
+
+    pub fn restart_stream(self: *IceRuntime, stream_id: u32, controlling: bool, start_pair_id: u64) !RestartSummary {
+        const entry = self.find_entry(stream_id) orelse return error.NotFound;
+        try entry.runtime.reset_for_restart();
+
+        const pair_summary = try self.populate_stream_checklists(stream_id, controlling, start_pair_id);
+        return .{
+            .stream_id = stream_id,
+            .pair_summary = pair_summary,
+        };
     }
 
     pub fn add_remote_candidate_and_expand(
@@ -343,4 +359,48 @@ test "ice runtime timeout aggregation across streams" {
     var out: [8]TimedOutCheck = undefined;
     const expired = try runtime.expire_all(349, &out);
     try std.testing.expectEqual(@as(usize, 1), expired);
+}
+
+test "ice runtime restart stream reinitializes pipeline" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 90 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 90 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{});
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    const first = try runtime.populate_stream_checklists(stream_id, true, 5000);
+    try std.testing.expectEqual(@as(usize, 1), first.added);
+
+    try runtime.start_connecting_all();
+    var prng = std.Random.DefaultPrng.init(23);
+    _ = try runtime.start_next_check_any(prng.random(), 0);
+
+    const restarted = try runtime.restart_stream(stream_id, true, 6000);
+    try std.testing.expectEqual(stream_id, restarted.stream_id);
+    try std.testing.expectEqual(@as(usize, 1), restarted.pair_summary.added);
+    try std.testing.expectEqual(@as(u64, 6001), restarted.pair_summary.next_pair_id);
 }
