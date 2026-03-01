@@ -5,6 +5,9 @@ pub const EventTask = @import("core/events.zig").Task;
 pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
 pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
+pub const BytestreamMode = @import("core/bytestream_hooks.zig").BytestreamMode;
+pub const BytestreamHooks = @import("core/bytestream_hooks.zig").BytestreamHooks;
+pub const BytestreamDispatcher = @import("core/bytestream_hooks.zig").BytestreamDispatcher;
 pub const ConnectivityCheckTracker = @import("core/conncheck.zig").ConnectivityCheckTracker;
 pub const ConnectivityCheckMeta = @import("core/conncheck.zig").CheckMeta;
 pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCheck;
@@ -720,4 +723,12 @@ test "ice tcp action exports are reachable" {
     try std.testing.expect(action.initiate_connect);
     const pair = try ice_tcp_action_for_pair(.sim_open, .passive);
     try std.testing.expect(pair.accept_incoming);
+}
+
+test "bytestream hook exports are reachable" {
+    var dispatcher = BytestreamDispatcher.init(.opportunistic);
+    dispatcher.emit_ready(1, 1);
+    dispatcher.emit_data(1, 1, "hi");
+    dispatcher.emit_closed(1, 1);
+    try std.testing.expect(dispatcher.mode == BytestreamMode.opportunistic);
 }
