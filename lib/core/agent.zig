@@ -257,7 +257,7 @@ test "agent populates runtime checklists from stream candidates" {
         .address = remote_addr,
     }));
 
-    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, stream_id, &component_ids, .{});
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, stream_id, &component_ids, .{}, .{});
     defer runtime.deinit();
 
     const summary = try agent.populate_stream_checklists(stream_id, &runtime, true, 2000);

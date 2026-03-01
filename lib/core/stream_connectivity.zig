@@ -2,6 +2,7 @@ const std = @import("std");
 const connectivity_engine = @import("connectivity_engine.zig");
 const checklist = @import("checklist.zig");
 const conncheck = @import("conncheck.zig");
+const consent = @import("consent.zig");
 const component = @import("component.zig");
 const parser = @import("../protocol/stun/parser.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
@@ -26,6 +27,7 @@ pub const StreamConnectivityRuntime = struct {
         stream_id: u32,
         component_ids: []const u16,
         retry_policy: transaction.RetryPolicy,
+        consent_config: consent.ConsentConfig,
     ) !StreamConnectivityRuntime {
         var engines = std.ArrayList(connectivity_engine.ComponentConnectivityEngine).empty;
         errdefer {
@@ -39,6 +41,7 @@ pub const StreamConnectivityRuntime = struct {
                 stream_id,
                 component_id,
                 retry_policy,
+                consent_config,
             ));
         }
 
@@ -92,6 +95,21 @@ pub const StreamConnectivityRuntime = struct {
         for (self.engines.items) |*engine| {
             try engine.reset_for_restart();
         }
+    }
+
+    pub fn any_consent_due_probe(self: StreamConnectivityRuntime, now_ms: u64) bool {
+        for (self.engines.items) |engine| {
+            if (engine.consent_due_probe(now_ms)) return true;
+        }
+        return false;
+    }
+
+    pub fn tick_consent_all(self: *StreamConnectivityRuntime, now_ms: u64) usize {
+        var failed_components: usize = 0;
+        for (self.engines.items) |*engine| {
+            if (engine.tick_consent(now_ms)) failed_components += 1;
+        }
+        return failed_components;
     }
 
     pub fn start_next_check_for_component(
@@ -161,7 +179,7 @@ pub const StreamConnectivityRuntime = struct {
 
 test "stream connectivity runtime handles per-component checks" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 10, &component_ids, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 10, &component_ids, .{}, .{});
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -206,7 +224,7 @@ test "stream connectivity runtime handles per-component checks" {
 
 test "stream connectivity runtime start_next_check_any uses first available" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 20, &component_ids, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 20, &component_ids, .{}, .{});
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -227,7 +245,7 @@ test "stream connectivity runtime start_next_check_any uses first available" {
 
 test "stream connectivity runtime timeout aggregation" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 30, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 1 });
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 30, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{});
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -262,7 +280,7 @@ test "stream connectivity runtime timeout aggregation" {
 
 test "stream connectivity runtime restart clears engines" {
     const component_ids = [_]u16{1};
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 40, &component_ids, .{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 40, &component_ids, .{}, .{});
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -283,4 +301,41 @@ test "stream connectivity runtime restart clears engines" {
     try std.testing.expectEqual(component.ComponentState.connecting, try runtime.component_state(1));
     try std.testing.expectEqual(@as(usize, 0), runtime.get_engine(1).?.tracker.pending_count());
     try std.testing.expectEqual(@as(usize, 0), runtime.get_engine(1).?.checklist.pair_count());
+}
+
+test "stream connectivity runtime consent probing and failure tick" {
+    const component_ids = [_]u16{1};
+    var runtime = try StreamConnectivityRuntime.init(
+        std.testing.allocator,
+        50,
+        &component_ids,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 },
+    );
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 700,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = true });
+
+    var prng = std.Random.DefaultPrng.init(18);
+    const tx_id = (try runtime.start_next_check_for_component(1, prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try runtime.on_response(1, view, 2);
+
+    try std.testing.expect(runtime.any_consent_due_probe(12));
+    try runtime.get_engine(1).?.on_consent_probe_sent(12);
+    const failed = runtime.tick_consent_all(17);
+    try std.testing.expectEqual(@as(usize, 1), failed);
+    try std.testing.expectEqual(component.ComponentState.failed, try runtime.component_state(1));
 }

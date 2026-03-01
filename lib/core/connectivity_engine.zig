@@ -2,6 +2,7 @@ const std = @import("std");
 const checklist_mod = @import("checklist.zig");
 const conncheck = @import("conncheck.zig");
 const component_mod = @import("component.zig");
+const consent_mod = @import("consent.zig");
 const parser = @import("../protocol/stun/parser.zig");
 const message = @import("../protocol/stun/message.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
@@ -19,12 +20,14 @@ pub const ComponentConnectivityEngine = struct {
     checklist: checklist_mod.Checklist,
     tracker: conncheck.ConnectivityCheckTracker,
     pair_contexts: std.AutoHashMap(u64, PairContext),
+    consent: consent_mod.ConsentTracker,
 
     pub fn init(
         allocator: std.mem.Allocator,
         stream_id: u32,
         component_id: u16,
         retry_policy: transaction.RetryPolicy,
+        consent_config: consent_mod.ConsentConfig,
     ) ComponentConnectivityEngine {
         return .{
             .allocator = allocator,
@@ -33,6 +36,7 @@ pub const ComponentConnectivityEngine = struct {
             .checklist = checklist_mod.Checklist.init(allocator),
             .tracker = conncheck.ConnectivityCheckTracker.init(allocator, retry_policy),
             .pair_contexts = std.AutoHashMap(u64, PairContext).init(allocator),
+            .consent = consent_mod.ConsentTracker.init(consent_config),
         };
     }
 
@@ -113,6 +117,10 @@ pub const ComponentConnectivityEngine = struct {
             completed.meta.is_nominated,
         );
 
+        if (self.component.state == .ready or self.component.state == .connected) {
+            self.consent.arm(completed.meta.candidate_pair_id, now_ms);
+        }
+
         return completed;
     }
 
@@ -134,17 +142,36 @@ pub const ComponentConnectivityEngine = struct {
         }
     }
 
+    pub fn consent_due_probe(self: ComponentConnectivityEngine, now_ms: u64) bool {
+        return self.consent.due_probe(now_ms);
+    }
+
+    pub fn on_consent_probe_sent(self: *ComponentConnectivityEngine, now_ms: u64) !void {
+        try self.consent.on_probe_sent(now_ms);
+    }
+
+    pub fn on_consent_response(self: *ComponentConnectivityEngine, now_ms: u64) !void {
+        try self.consent.on_response(now_ms);
+    }
+
+    pub fn tick_consent(self: *ComponentConnectivityEngine, now_ms: u64) bool {
+        const failed = self.consent.on_tick(now_ms);
+        if (failed) self.component.mark_failed();
+        return failed;
+    }
+
     pub fn reset_for_restart(self: *ComponentConnectivityEngine) !void {
         self.checklist.clear();
         self.tracker.clear();
         self.pair_contexts.clearRetainingCapacity();
+        self.consent.reset();
         self.component.reset();
         try self.start_connecting();
     }
 };
 
 test "connectivity engine success path selects pair" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, .{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, .{}, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -176,7 +203,7 @@ test "connectivity engine success path selects pair" {
 }
 
 test "connectivity engine error response drives pair failure" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 2, 1, .{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 2, 1, .{}, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -209,7 +236,7 @@ test "connectivity engine error response drives pair failure" {
 }
 
 test "connectivity engine timeout failure transition" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 3, 1, .{ .base_rto_ms = 100, .max_retransmits = 1 });
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 3, 1, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -237,7 +264,7 @@ test "connectivity engine timeout failure transition" {
 }
 
 test "connectivity engine uses triggered queue first" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 4, 1, .{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 4, 1, .{}, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -272,7 +299,7 @@ test "connectivity engine uses triggered queue first" {
 }
 
 test "connectivity engine restart clears state and re-enters connecting" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 5, 1, .{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 5, 1, .{}, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -294,4 +321,47 @@ test "connectivity engine restart clears state and re-enters connecting" {
     try std.testing.expectEqual(component_mod.ComponentState.connecting, engine.component.state);
     try std.testing.expectEqual(@as(usize, 0), engine.checklist.pair_count());
     try std.testing.expectEqual(@as(usize, 0), engine.tracker.pending_count());
+}
+
+test "connectivity engine consent freshness lifecycle" {
+    var engine = ComponentConnectivityEngine.init(
+        std.testing.allocator,
+        6,
+        1,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 1 },
+    );
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 600,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = true });
+
+    var prng = std.Random.DefaultPrng.init(16);
+    const tx_id = (try engine.start_next_check(prng.random(), 0)).?;
+
+    var packet: [message.header_size]u8 = undefined;
+    const header = message.Header.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try engine.on_response(view, 2);
+    try std.testing.expectEqual(component_mod.ComponentState.ready, engine.component.state);
+
+    try std.testing.expect(engine.consent_due_probe(12));
+    try engine.on_consent_probe_sent(12);
+    try std.testing.expectEqual(consent_mod.ConsentState.awaiting_response, engine.consent.state);
+    try std.testing.expect(!engine.tick_consent(16));
+    try std.testing.expectEqual(consent_mod.ConsentState.awaiting_response, engine.consent.state);
+    try std.testing.expect(!engine.tick_consent(17));
+    try std.testing.expectEqual(consent_mod.ConsentState.active, engine.consent.state);
+
+    try engine.on_consent_probe_sent(27);
+    try std.testing.expect(engine.tick_consent(32));
+    try std.testing.expectEqual(component_mod.ComponentState.failed, engine.component.state);
 }

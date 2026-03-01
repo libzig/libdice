@@ -4,6 +4,7 @@ const candidate = @import("candidate.zig");
 const stream_connectivity = @import("stream_connectivity.zig");
 const pair_builder = @import("pair_builder.zig");
 const conncheck = @import("conncheck.zig");
+const consent = @import("consent.zig");
 const parser = @import("../protocol/stun/parser.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
 
@@ -17,6 +18,10 @@ pub const TimedOutCheck = struct {
     stream_id: u32,
     component_id: u16,
     timed_out: conncheck.TimedOutCheck,
+};
+
+pub const ConsentTickSummary = struct {
+    failed_components: usize,
 };
 
 pub const RestartSummary = struct {
@@ -33,13 +38,20 @@ pub const IceRuntime = struct {
     allocator: std.mem.Allocator,
     agent: *agent_mod.Agent,
     retry_policy: transaction.RetryPolicy,
+    consent_config: consent.ConsentConfig,
     entries: std.ArrayList(RuntimeEntry),
 
-    pub fn init(allocator: std.mem.Allocator, agent: *agent_mod.Agent, retry_policy: transaction.RetryPolicy) IceRuntime {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        agent: *agent_mod.Agent,
+        retry_policy: transaction.RetryPolicy,
+        consent_config: consent.ConsentConfig,
+    ) IceRuntime {
         return .{
             .allocator = allocator,
             .agent = agent,
             .retry_policy = retry_policy,
+            .consent_config = consent_config,
             .entries = .empty,
         };
     }
@@ -78,6 +90,7 @@ pub const IceRuntime = struct {
             stream_id,
             component_ids,
             self.retry_policy,
+            self.consent_config,
         );
 
         try self.entries.append(self.allocator, .{
@@ -186,6 +199,15 @@ pub const IceRuntime = struct {
 
         return written;
     }
+
+    pub fn tick_consent_all(self: *IceRuntime, now_ms: u64) ConsentTickSummary {
+        var failed_components: usize = 0;
+        for (self.entries.items) |*entry| {
+            failed_components += entry.runtime.tick_consent_all(now_ms);
+        }
+
+        return .{ .failed_components = failed_components };
+    }
 };
 
 test "ice runtime attach populate and response flow" {
@@ -217,7 +239,7 @@ test "ice runtime attach populate and response flow" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
     defer runtime.deinit();
 
     try std.testing.expect(try runtime.attach_stream(stream_id));
@@ -258,7 +280,7 @@ test "ice runtime trickle remote candidate expansion" {
         .address = local_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
 
@@ -342,7 +364,7 @@ test "ice runtime timeout aggregation across streams" {
         .address = remote_2,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{ .base_rto_ms = 100, .max_retransmits = 1 });
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{ .base_rto_ms = 100, .max_retransmits = 1 }, .{});
     defer runtime.deinit();
 
     try std.testing.expect(try runtime.attach_stream(s1));
@@ -388,7 +410,7 @@ test "ice runtime restart stream reinitializes pipeline" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{});
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
 
@@ -403,4 +425,58 @@ test "ice runtime restart stream reinitializes pipeline" {
     try std.testing.expectEqual(stream_id, restarted.stream_id);
     try std.testing.expectEqual(@as(usize, 1), restarted.pair_summary.added);
     try std.testing.expectEqual(@as(u64, 6001), restarted.pair_summary.next_pair_id);
+}
+
+test "ice runtime consent ticking aggregates component failures" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 99 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 99 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(
+        std.testing.allocator,
+        &agent,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 },
+    );
+    defer runtime.deinit();
+
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 7000);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(24);
+    const started = (try runtime.start_next_check_any(prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, started.transaction_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try runtime.on_response(started.stream_id, started.component_id, view, 2);
+
+    // Trigger first missed consent probe path.
+    const entry = runtime.find_entry(stream_id).?;
+    try entry.runtime.get_engine(1).?.on_consent_probe_sent(12);
+    const summary = runtime.tick_consent_all(17);
+    try std.testing.expectEqual(@as(usize, 1), summary.failed_components);
 }

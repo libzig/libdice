@@ -11,6 +11,9 @@ pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCh
 pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
 pub const ComponentConnectivityEngine = @import("core/connectivity_engine.zig").ComponentConnectivityEngine;
 pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairContext;
+pub const ConsentConfig = @import("core/consent.zig").ConsentConfig;
+pub const ConsentState = @import("core/consent.zig").ConsentState;
+pub const ConsentTracker = @import("core/consent.zig").ConsentTracker;
 pub const StreamConnectivityRuntime = @import("core/stream_connectivity.zig").StreamConnectivityRuntime;
 pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCheck;
 pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
@@ -20,6 +23,7 @@ pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
 pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
 pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
 pub const IceRuntimeRestartSummary = @import("core/ice_runtime.zig").RestartSummary;
+pub const IceRuntimeConsentTickSummary = @import("core/ice_runtime.zig").ConsentTickSummary;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -155,7 +159,7 @@ test "connectivity check tracker export is reachable" {
 }
 
 test "component connectivity engine export is reachable" {
-    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, StunRetryPolicy{});
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, StunRetryPolicy{}, .{});
     defer engine.deinit();
 
     try engine.start_connecting();
@@ -182,7 +186,7 @@ test "component connectivity engine export is reachable" {
 
 test "stream connectivity runtime export is reachable" {
     const component_ids = [_]u16{ 1, 2 };
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, StunRetryPolicy{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, StunRetryPolicy{}, .{});
     defer runtime.deinit();
 
     try runtime.start_connecting_all();
@@ -232,7 +236,7 @@ test "pair builder exports are reachable" {
     }));
 
     const component_ids = [_]u16{1};
-    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 77, &component_ids, StunRetryPolicy{});
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 77, &component_ids, StunRetryPolicy{}, .{});
     defer runtime.deinit();
 
     const summary: PairBuildSummary = try populate_stream_checklists(&stream, &runtime, true, 9000);
@@ -266,7 +270,7 @@ test "ice runtime exports are reachable" {
         .address = remote_addr,
     }));
 
-    var runtime = IceRuntime.init(std.testing.allocator, &agent, StunRetryPolicy{});
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, StunRetryPolicy{}, .{});
     defer runtime.deinit();
     try std.testing.expect(try runtime.attach_stream(stream_id));
     _ = try runtime.populate_stream_checklists(stream_id, true, 10000);
@@ -283,6 +287,9 @@ test "ice runtime exports are reachable" {
 
     const restarted: IceRuntimeRestartSummary = try runtime.restart_stream(stream_id, true, 11000);
     try std.testing.expectEqual(stream_id, restarted.stream_id);
+
+    const consent_tick: IceRuntimeConsentTickSummary = runtime.tick_consent_all(12000);
+    try std.testing.expectEqual(@as(usize, 0), consent_tick.failed_components);
 }
 
 test "checklist exports are reachable" {
