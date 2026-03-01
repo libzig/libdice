@@ -32,6 +32,10 @@ pub const AllocationLease = struct {
 pub const ReceivedPacket = union(enum) {
     stun: parser.MessageView,
     channel_data: channel_data.FrameView,
+    relayed_data: struct {
+        peer: candidate.Address,
+        payload: []const u8,
+    },
 };
 
 pub const TurnUdpSocketError = parser.ParserError || channel_data.ChannelDataError || usage_turn.TurnError || error{
@@ -140,6 +144,25 @@ pub const TurnUdpSocket = struct {
         return self.socket.send_to(self.server, frame);
     }
 
+    pub fn send_to_peer(
+        self: *TurnUdpSocket,
+        packet_buf: []u8,
+        transaction_id: [12]u8,
+        peer: candidate.Address,
+        payload: []const u8,
+        now_ms: u64,
+    ) !usize {
+        if (self.find_channel_for_peer(peer, now_ms)) |binding| {
+            return self.send_channel_data(packet_buf, binding.channel_number, payload);
+        }
+
+        const stun_peer = candidate_to_stun_address(peer);
+        return self.send_data_indication(packet_buf, transaction_id, .{
+            .peer_address = stun_peer,
+            .data = payload,
+        });
+    }
+
     pub fn recv_from_server(self: *TurnUdpSocket, recv_buf: []u8) TurnUdpSocketError!?ReceivedPacket {
         const packet = self.socket.recv_from(recv_buf) catch |err| switch (err) {
             error.WouldBlock => return null,
@@ -152,10 +175,23 @@ pub const TurnUdpSocket = struct {
         const first = recv_buf[0];
         const is_channel_data = (first & 0b1100_0000) == 0b0100_0000;
         if (is_channel_data) {
-            return .{ .channel_data = try channel_data.decode_frame(recv_buf[0..packet.bytes], false) };
+            const frame = try channel_data.decode_frame(recv_buf[0..packet.bytes], false);
+            if (self.find_channel_by_number(frame.channel_number)) |binding| {
+                return .{ .relayed_data = .{ .peer = binding.peer, .payload = frame.payload } };
+            }
+            return .{ .channel_data = frame };
         }
 
-        return .{ .stun = try parser.parse_message(recv_buf[0..packet.bytes]) };
+        const view = try parser.parse_message(recv_buf[0..packet.bytes]);
+        if (usage_turn.is_data_indication(view)) {
+            const data_ind = try usage_turn.parse_data_indication(view);
+            return .{ .relayed_data = .{
+                .peer = stun_to_candidate_address(data_ind.peer_address),
+                .payload = data_ind.data,
+            } };
+        }
+
+        return .{ .stun = view };
     }
 
     pub fn permission_count(self: TurnUdpSocket) usize {
@@ -165,7 +201,36 @@ pub const TurnUdpSocket = struct {
     pub fn channel_binding_count(self: TurnUdpSocket) usize {
         return self.channels.items.len;
     }
+
+    fn find_channel_by_number(self: *const TurnUdpSocket, channel_number: u16) ?ChannelBinding {
+        for (self.channels.items) |entry| {
+            if (entry.channel_number == channel_number) return entry;
+        }
+        return null;
+    }
+
+    fn find_channel_for_peer(self: *const TurnUdpSocket, peer: candidate.Address, now_ms: u64) ?ChannelBinding {
+        for (self.channels.items) |entry| {
+            if (entry.expires_at_ms < now_ms) continue;
+            if (candidate.Address.eql(entry.peer, peer)) return entry;
+        }
+        return null;
+    }
 };
+
+fn candidate_to_stun_address(address: candidate.Address) address_attrs.StunAddress {
+    return switch (address) {
+        .ipv4 => |v4| .{ .ipv4 = .{ .port = v4.port, .ip = v4.ip } },
+        .ipv6 => |v6| .{ .ipv6 = .{ .port = v6.port, .ip = v6.ip } },
+    };
+}
+
+fn stun_to_candidate_address(address: address_attrs.StunAddress) candidate.Address {
+    return switch (address) {
+        .ipv4 => |v4| .{ .ipv4 = .{ .port = v4.port, .ip = v4.ip } },
+        .ipv6 => |v6| .{ .ipv6 = .{ .port = v6.port, .ip = v6.ip } },
+    };
+}
 
 test "turn udp socket sends allocate request to server" {
     var server = try udp_socket.UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
@@ -262,6 +327,80 @@ test "turn udp socket receives stun and channel data from server" {
         },
         else => return error.UnexpectedPacketType,
     }
+}
+
+test "turn udp socket decapsulates TURN data indication as relayed data" {
+    var server = try udp_socket.UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer server.deinit();
+    const server_addr = try server.local_address();
+
+    var turn = try TurnUdpSocket.init_nonblocking(std.testing.allocator, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, server_addr);
+    defer turn.deinit();
+    const client_addr = try turn.local_address();
+
+    const tx_id = [_]u8{ 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 };
+    const peer: address_attrs.StunAddress = .{ .ipv4 = .{ .port = 9000, .ip = .{ 203, 0, 113, 90 } } };
+    var packet: [256]u8 = undefined;
+    var builder = try @import("../protocol/stun/encoder.zig").Builder.init(&packet, usage_turn.data_indication_type, tx_id);
+    try address_attrs.add_xor_peer_address(&builder, peer, tx_id);
+    try builder.add_attr(usage_turn.data_attr_type, "hello-relay");
+    const bytes = try builder.finish();
+    _ = try server.send_to(client_addr, bytes);
+
+    var recv: [256]u8 = undefined;
+    const parsed = (try turn.recv_from_server(&recv)).?;
+    switch (parsed) {
+        .relayed_data => |data| {
+            try std.testing.expectEqualStrings("hello-relay", data.payload);
+            try std.testing.expectEqualDeep(stun_to_candidate_address(peer), data.peer);
+        },
+        else => return error.UnexpectedPacketType,
+    }
+}
+
+test "turn udp socket send_to_peer prefers active channel binding" {
+    var server = try udp_socket.UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer server.deinit();
+    const server_addr = try server.local_address();
+
+    var turn = try TurnUdpSocket.init_nonblocking(std.testing.allocator, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, server_addr);
+    defer turn.deinit();
+
+    const peer_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 91 }, .port = 5000 } };
+    try turn.set_channel_binding(0x4005, peer_addr, 1_000, 60);
+
+    const tx_id = [_]u8{ 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
+    var out: [256]u8 = undefined;
+    _ = try turn.send_to_peer(&out, tx_id, peer_addr, "abc", 2_000);
+
+    var recv: [256]u8 = undefined;
+    const got = try server.recv_from(&recv);
+    const frame = try channel_data.decode_frame(recv[0..got.bytes], false);
+    try std.testing.expectEqual(@as(u16, 0x4005), frame.channel_number);
+    try std.testing.expectEqualStrings("abc", frame.payload);
+}
+
+test "turn udp socket send_to_peer falls back to data indication" {
+    var server = try udp_socket.UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer server.deinit();
+    const server_addr = try server.local_address();
+
+    var turn = try TurnUdpSocket.init_nonblocking(std.testing.allocator, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, server_addr);
+    defer turn.deinit();
+
+    const peer_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 92 }, .port = 5001 } };
+    const tx_id = [_]u8{ 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 };
+    var out: [256]u8 = undefined;
+    _ = try turn.send_to_peer(&out, tx_id, peer_addr, "xyz", 1_000);
+
+    var recv: [256]u8 = undefined;
+    const got = try server.recv_from(&recv);
+    const view = try parser.parse_message(recv[0..got.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.send_indication_type), view.header.message_type);
+    try std.testing.expectEqualStrings("xyz", (try usage_turn.read_data_attr(view)).?);
+    const peer_attr = (try address_attrs.find_xor_peer_address(view)).?;
+    const parsed_peer = try address_attrs.decode_xor_address(peer_attr, view.header.transaction_id);
+    try std.testing.expectEqualDeep(candidate_to_stun_address(peer_addr), parsed_peer);
 }
 
 test "turn udp socket tracks permissions and channel bindings" {

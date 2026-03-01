@@ -15,6 +15,8 @@ pub const refresh_error_response_type: u16 = 0x0114;
 pub const create_permission_request_type: u16 = 0x0008;
 pub const create_permission_success_response_type: u16 = 0x0108;
 pub const create_permission_error_response_type: u16 = 0x0118;
+pub const send_indication_type: u16 = 0x0016;
+pub const data_indication_type: u16 = 0x0017;
 
 pub const username_attr_type: u16 = 0x0006;
 pub const realm_attr_type: u16 = 0x0014;
@@ -33,6 +35,7 @@ pub const TurnError = parser.ParserError || integrity.IntegrityError || address_
     InvalidErrorCode,
     NotAllocateSuccessResponse,
     NotRefreshSuccessResponse,
+    NotDataIndication,
     InvalidIntegrity,
 };
 
@@ -64,6 +67,12 @@ pub const RefreshSuccessResponseInfo = struct {
     lifetime_seconds: ?u32,
     has_message_integrity: bool,
     has_fingerprint: bool,
+};
+
+pub const DataIndicationInfo = struct {
+    transaction_id: [12]u8,
+    peer_address: address_attrs.StunAddress,
+    data: []const u8,
 };
 
 pub const ChannelBindRequestOptions = struct {
@@ -169,7 +178,7 @@ pub fn build_channel_bind_request(buffer: []u8, transaction_id: [12]u8, options:
 }
 
 pub fn build_send_indication(buffer: []u8, transaction_id: [12]u8, options: SendIndicationOptions) encoder.EncodeError![]const u8 {
-    var builder = try encoder.Builder.init(buffer, 0x0016, transaction_id);
+    var builder = try encoder.Builder.init(buffer, send_indication_type, transaction_id);
     try address_attrs.add_xor_peer_address(&builder, options.peer_address, transaction_id);
     try builder.add_attr(data_attr_type, options.data);
     return builder.finish();
@@ -228,6 +237,23 @@ pub fn read_data_attr(view: parser.MessageView) TurnError!?[]const u8 {
         if (attr.header.attr_type == data_attr_type) return attr.value;
     }
     return null;
+}
+
+pub fn is_data_indication(view: parser.MessageView) bool {
+    return view.header.message_type == data_indication_type;
+}
+
+pub fn parse_data_indication(view: parser.MessageView) TurnError!DataIndicationInfo {
+    if (!is_data_indication(view)) return error.NotDataIndication;
+
+    const peer_attr = (try address_attrs.find_xor_peer_address(view)) orelse return error.InvalidAttrLength;
+    const payload = (try read_data_attr(view)) orelse return error.InvalidAttrLength;
+
+    return .{
+        .transaction_id = view.header.transaction_id,
+        .peer_address = try address_attrs.decode_xor_address(peer_attr, view.header.transaction_id),
+        .data = payload,
+    };
 }
 
 pub fn count_xor_peer_addresses(view: parser.MessageView) parser.ParserError!usize {
@@ -492,4 +518,21 @@ test "create permission request rejects empty peer list" {
     const peers = [_]address_attrs.StunAddress{};
 
     try std.testing.expectError(error.NoPeerAddress, build_create_permission_request(&packet, tx_id, .{ .peer_addresses = &peers }));
+}
+
+test "parse TURN data indication with xor peer and data" {
+    const tx_id = [_]u8{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8 };
+    const peer: address_attrs.StunAddress = .{ .ipv4 = .{ .port = 7777, .ip = .{ 203, 0, 113, 90 } } };
+    var packet: [256]u8 = undefined;
+
+    var builder = try encoder.Builder.init(&packet, data_indication_type, tx_id);
+    try address_attrs.add_xor_peer_address(&builder, peer, tx_id);
+    try builder.add_attr(data_attr_type, "relay-payload");
+    const bytes = try builder.finish();
+
+    const view = try parser.parse_message(bytes);
+    try std.testing.expect(is_data_indication(view));
+    const parsed = try parse_data_indication(view);
+    try std.testing.expectEqualDeep(peer, parsed.peer_address);
+    try std.testing.expectEqualStrings("relay-payload", parsed.data);
 }
