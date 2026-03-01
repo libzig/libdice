@@ -16,6 +16,13 @@ pub const checklist_compute_pair_priority = @import("core/checklist.zig").comput
 pub const Agent = @import("core/agent.zig").Agent;
 pub const Stream = @import("core/stream.zig").Stream;
 pub const Credentials = @import("core/stream.zig").Credentials;
+pub const Candidate = @import("core/candidate.zig").Candidate;
+pub const CandidateType = @import("core/candidate.zig").CandidateType;
+pub const CandidateTransport = @import("core/candidate.zig").Transport;
+pub const CandidateAddress = @import("core/candidate.zig").Address;
+pub const CandidateList = @import("core/candidate.zig").CandidateList;
+pub const candidate_compute_priority = @import("core/candidate.zig").compute_candidate_priority;
+pub const candidate_compute_foundation = @import("core/candidate.zig").compute_foundation;
 pub const Component = @import("core/component.zig").Component;
 pub const ComponentState = @import("core/component.zig").ComponentState;
 pub const SelectedPair = @import("core/component.zig").SelectedPair;
@@ -164,6 +171,20 @@ test "agent stream component exports are reachable" {
     try component.start_connecting();
     try component.on_check_succeeded(1, 10, 20, true);
     try std.testing.expectEqual(ComponentState.ready, component.state);
+
+    const addr: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 9 }, .port = 7777 } };
+    const local = Candidate{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .host, addr),
+        .priority = candidate_compute_priority(.host, 100, 1),
+        .address = addr,
+    };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, local));
+    try std.testing.expectEqual(@as(usize, 1), try agent.local_candidate_count(stream_id, 1));
 }
 
 test "stun header export is reachable" {

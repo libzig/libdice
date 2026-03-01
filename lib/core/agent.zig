@@ -1,5 +1,6 @@
 const std = @import("std");
 const stream_mod = @import("stream.zig");
+const candidate = @import("candidate.zig");
 
 pub const Agent = struct {
     allocator: std.mem.Allocator,
@@ -68,6 +69,26 @@ pub const Agent = struct {
         const stream = self.get_stream(stream_id) orelse return error.NotFound;
         try stream.set_remote_credentials(ufrag, password);
     }
+
+    pub fn add_local_candidate(self: *Agent, stream_id: u32, value: candidate.Candidate) !bool {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.add_local_candidate(value);
+    }
+
+    pub fn add_remote_candidate(self: *Agent, stream_id: u32, value: candidate.Candidate) !bool {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.add_remote_candidate(value);
+    }
+
+    pub fn local_candidate_count(self: *Agent, stream_id: u32, component_id: u16) !usize {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.local_candidate_count(component_id);
+    }
+
+    pub fn remote_candidate_count(self: *Agent, stream_id: u32, component_id: u16) !usize {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.remote_candidate_count(component_id);
+    }
 };
 
 test "agent manages stream lifecycle" {
@@ -98,4 +119,36 @@ test "agent component and credential access" {
     const stream = agent.get_stream(stream_id).?;
     try std.testing.expectEqualStrings("ru", (&stream.remote_credentials.?).ufrag());
     try std.testing.expectError(error.NotFound, agent.set_remote_credentials(404, "u", "p"));
+}
+
+test "agent candidate routing to stream" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 8 }, .port = 6000 } };
+    const local = candidate.Candidate{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, addr),
+        .priority = candidate.compute_candidate_priority(.host, 1, 1),
+        .address = addr,
+    };
+    const remote = candidate.Candidate{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 2, 1),
+        .address = addr,
+    };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, local));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, remote));
+    try std.testing.expectEqual(@as(usize, 1), try agent.local_candidate_count(stream_id, 1));
+    try std.testing.expectEqual(@as(usize, 1), try agent.remote_candidate_count(stream_id, 1));
+    try std.testing.expectError(error.NotFound, agent.local_candidate_count(999, 1));
 }

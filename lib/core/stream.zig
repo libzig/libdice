@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const component = @import("component.zig");
+pub const candidate = @import("candidate.zig");
 
 pub const max_ufrag_len: usize = 32;
 pub const max_password_len: usize = 256;
@@ -38,6 +39,8 @@ pub const Stream = struct {
     allocator: std.mem.Allocator,
     id: u32,
     components: std.ArrayList(component.Component),
+    local_candidates: candidate.CandidateList,
+    remote_candidates: candidate.CandidateList,
     local_credentials: ?Credentials,
     remote_credentials: ?Credentials,
 
@@ -46,12 +49,16 @@ pub const Stream = struct {
             .allocator = allocator,
             .id = id,
             .components = .empty,
+            .local_candidates = candidate.CandidateList.init(allocator),
+            .remote_candidates = candidate.CandidateList.init(allocator),
             .local_credentials = null,
             .remote_credentials = null,
         };
     }
 
     pub fn deinit(self: *Stream) void {
+        self.local_candidates.deinit();
+        self.remote_candidates.deinit();
         self.components.deinit(self.allocator);
     }
 
@@ -76,6 +83,22 @@ pub const Stream = struct {
 
     pub fn set_remote_credentials(self: *Stream, ufrag: []const u8, password: []const u8) !void {
         self.remote_credentials = try Credentials.from_slices(ufrag, password);
+    }
+
+    pub fn add_local_candidate(self: *Stream, value: candidate.Candidate) !bool {
+        return self.local_candidates.add(value);
+    }
+
+    pub fn add_remote_candidate(self: *Stream, value: candidate.Candidate) !bool {
+        return self.remote_candidates.add(value);
+    }
+
+    pub fn local_candidate_count(self: Stream, component_id: u16) usize {
+        return self.local_candidates.count_for_component(component_id);
+    }
+
+    pub fn remote_candidate_count(self: Stream, component_id: u16) usize {
+        return self.remote_candidates.count_for_component(component_id);
     }
 };
 
@@ -107,4 +130,39 @@ test "credential length validation" {
     var oversized_ufrag: [33]u8 = undefined;
     @memset(&oversized_ufrag, 'u');
     try std.testing.expectError(error.CredentialTooLong, Credentials.from_slices(&oversized_ufrag, "ok"));
+}
+
+test "stream candidate storage by component" {
+    var stream = Stream.init(std.testing.allocator, 3);
+    defer stream.deinit();
+
+    const a1: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 1 }, .port = 5000 } };
+    const a2: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 2 }, .port = 5001 } };
+
+    const c1 = candidate.Candidate{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, a1),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = a1,
+    };
+
+    const c2 = candidate.Candidate{
+        .id = 2,
+        .component_id = 2,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, a2),
+        .priority = candidate.compute_candidate_priority(.srflx, 20, 2),
+        .address = a2,
+    };
+
+    try std.testing.expect(try stream.add_local_candidate(c1));
+    try std.testing.expect(try stream.add_remote_candidate(c2));
+
+    try std.testing.expectEqual(@as(usize, 1), stream.local_candidate_count(1));
+    try std.testing.expectEqual(@as(usize, 1), stream.remote_candidate_count(2));
+    try std.testing.expectEqual(@as(usize, 0), stream.remote_candidate_count(1));
 }
