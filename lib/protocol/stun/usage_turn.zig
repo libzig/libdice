@@ -12,6 +12,10 @@ pub const refresh_request_type: u16 = 0x0004;
 pub const refresh_success_response_type: u16 = 0x0104;
 pub const refresh_error_response_type: u16 = 0x0114;
 
+pub const create_permission_request_type: u16 = 0x0008;
+pub const create_permission_success_response_type: u16 = 0x0108;
+pub const create_permission_error_response_type: u16 = 0x0118;
+
 pub const username_attr_type: u16 = 0x0006;
 pub const realm_attr_type: u16 = 0x0014;
 pub const nonce_attr_type: u16 = 0x0015;
@@ -30,6 +34,10 @@ pub const TurnError = parser.ParserError || integrity.IntegrityError || address_
     NotAllocateSuccessResponse,
     NotRefreshSuccessResponse,
     InvalidIntegrity,
+};
+
+pub const TurnBuildError = encoder.EncodeError || error{
+    NoPeerAddress,
 };
 
 pub const AllocateRequestOptions = struct {
@@ -71,6 +79,15 @@ pub const ChannelBindRequestOptions = struct {
 pub const SendIndicationOptions = struct {
     peer_address: address_attrs.StunAddress,
     data: []const u8,
+};
+
+pub const CreatePermissionRequestOptions = struct {
+    peer_addresses: []const address_attrs.StunAddress,
+    username: ?[]const u8 = null,
+    realm: ?[]const u8 = null,
+    nonce: ?[]const u8 = null,
+    integrity_key: ?[]const u8 = null,
+    include_fingerprint: bool = false,
 };
 
 pub fn build_allocate_request(buffer: []u8, transaction_id: [12]u8, options: AllocateRequestOptions) encoder.EncodeError![]const u8 {
@@ -158,6 +175,30 @@ pub fn build_send_indication(buffer: []u8, transaction_id: [12]u8, options: Send
     return builder.finish();
 }
 
+pub fn build_create_permission_request(buffer: []u8, transaction_id: [12]u8, options: CreatePermissionRequestOptions) TurnBuildError![]const u8 {
+    if (options.peer_addresses.len == 0) return error.NoPeerAddress;
+
+    var builder = try encoder.Builder.init(buffer, create_permission_request_type, transaction_id);
+
+    for (options.peer_addresses) |peer| {
+        try address_attrs.add_xor_peer_address(&builder, peer, transaction_id);
+    }
+
+    if (options.username) |value| try builder.add_attr(username_attr_type, value);
+    if (options.realm) |value| try builder.add_attr(realm_attr_type, value);
+    if (options.nonce) |value| try builder.add_attr(nonce_attr_type, value);
+
+    if (options.integrity_key) |key| {
+        try integrity.add_message_integrity_attr(&builder, key);
+    }
+
+    if (options.include_fingerprint) {
+        try integrity.add_fingerprint_attr(&builder);
+    }
+
+    return builder.finish();
+}
+
 pub fn is_allocate_success_response(view: parser.MessageView) bool {
     return view.header.message_type == allocate_success_response_type;
 }
@@ -187,6 +228,15 @@ pub fn read_data_attr(view: parser.MessageView) TurnError!?[]const u8 {
         if (attr.header.attr_type == data_attr_type) return attr.value;
     }
     return null;
+}
+
+pub fn count_xor_peer_addresses(view: parser.MessageView) parser.ParserError!usize {
+    var count: usize = 0;
+    var it = view.attr_iterator();
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == address_attrs.xor_peer_address_attr_type) count += 1;
+    }
+    return count;
 }
 
 pub fn read_lifetime_seconds(view: parser.MessageView) TurnError!?u32 {
@@ -410,4 +460,36 @@ test "channel bind request and send indication builders" {
     const send_peer_attr = (try address_attrs.find_xor_peer_address(send_view)).?;
     const send_peer = try address_attrs.decode_xor_address(send_peer_attr, tx_id);
     try std.testing.expectEqualDeep(peer, send_peer);
+}
+
+test "create permission request supports multiple peer addresses" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    const peers = [_]address_attrs.StunAddress{
+        .{ .ipv4 = .{ .port = 5001, .ip = .{ 203, 0, 113, 10 } } },
+        .{ .ipv4 = .{ .port = 5002, .ip = .{ 203, 0, 113, 11 } } },
+    };
+
+    var packet: [320]u8 = undefined;
+    const bytes = try build_create_permission_request(&packet, tx_id, .{
+        .peer_addresses = &peers,
+        .username = "user",
+        .realm = "example.org",
+        .nonce = "nonce",
+        .integrity_key = "turn-key",
+        .include_fingerprint = true,
+    });
+
+    const view = try parser.parse_message(bytes);
+    try std.testing.expectEqual(@as(u16, create_permission_request_type), view.header.message_type);
+    try std.testing.expectEqual(@as(usize, 2), try count_xor_peer_addresses(view));
+    try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+    try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
+}
+
+test "create permission request rejects empty peer list" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [64]u8 = undefined;
+    const peers = [_]address_attrs.StunAddress{};
+
+    try std.testing.expectError(error.NoPeerAddress, build_create_permission_request(&packet, tx_id, .{ .peer_addresses = &peers }));
 }

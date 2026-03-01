@@ -8,6 +8,7 @@ pub const TimerId = @import("core/timers.zig").TimerId;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
 pub const StunAddress = @import("protocol/stun/address_attrs.zig").StunAddress;
+pub const TurnChannelDataFrameView = @import("protocol/turn/channel_data.zig").FrameView;
 pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
 pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
 pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
@@ -31,6 +32,7 @@ pub const stun_turn_build_allocate_request = @import("protocol/stun/usage_turn.z
 pub const stun_turn_build_refresh_request = @import("protocol/stun/usage_turn.zig").build_refresh_request;
 pub const stun_turn_build_channel_bind_request = @import("protocol/stun/usage_turn.zig").build_channel_bind_request;
 pub const stun_turn_build_send_indication = @import("protocol/stun/usage_turn.zig").build_send_indication;
+pub const stun_turn_build_create_permission_request = @import("protocol/stun/usage_turn.zig").build_create_permission_request;
 pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
 pub const stun_turn_is_allocate_error_response = @import("protocol/stun/usage_turn.zig").is_allocate_error_response;
 pub const stun_turn_read_lifetime_seconds = @import("protocol/stun/usage_turn.zig").read_lifetime_seconds;
@@ -40,6 +42,9 @@ pub const stun_turn_parse_allocate_success_response = @import("protocol/stun/usa
 pub const stun_turn_parse_refresh_success_response = @import("protocol/stun/usage_turn.zig").parse_refresh_success_response;
 pub const stun_turn_read_channel_number = @import("protocol/stun/usage_turn.zig").read_channel_number;
 pub const stun_turn_read_data_attr = @import("protocol/stun/usage_turn.zig").read_data_attr;
+pub const stun_turn_count_xor_peer_addresses = @import("protocol/stun/usage_turn.zig").count_xor_peer_addresses;
+pub const turn_channel_encode_frame = @import("protocol/turn/channel_data.zig").encode_frame;
+pub const turn_channel_decode_frame = @import("protocol/turn/channel_data.zig").decode_frame;
 pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
 pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
@@ -239,4 +244,19 @@ test "stun turn usage exports are reachable" {
     });
     const send_view = try parse_stun_message(send_bytes);
     try std.testing.expectEqualStrings("x", (try stun_turn_read_data_attr(send_view)).?);
+
+    const peers = [_]StunAddress{peer};
+    const perm_bytes = try stun_turn_build_create_permission_request(&packet, tx_id, .{
+        .peer_addresses = &peers,
+    });
+    const perm_view = try parse_stun_message(perm_bytes);
+    try std.testing.expectEqual(@as(usize, 1), try stun_turn_count_xor_peer_addresses(perm_view));
+}
+
+test "turn channel data exports are reachable" {
+    var buf: [32]u8 = undefined;
+    const frame = try turn_channel_encode_frame(&buf, 0x4001, "abc", true);
+    const decoded: TurnChannelDataFrameView = try turn_channel_decode_frame(frame, true);
+    try std.testing.expectEqual(@as(u16, 0x4001), decoded.channel_number);
+    try std.testing.expectEqualStrings("abc", decoded.payload);
 }
