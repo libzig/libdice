@@ -72,6 +72,12 @@ pub const TurnUdpSocket = struct {
     pub const permission_default_lifetime_seconds: u32 = 300;
     pub const channel_default_lifetime_seconds: u32 = 600;
 
+    pub const ServerStunOutcome = enum {
+        ignored,
+        handled,
+        auth_challenge_required,
+    };
+
     allocator: std.mem.Allocator,
     socket: udp_socket.UdpSocket,
     server: candidate.Address,
@@ -144,22 +150,22 @@ pub const TurnUdpSocket = struct {
         }
     }
 
-    pub fn on_server_stun(self: *TurnUdpSocket, view: parser.MessageView, now_ms: u64, integrity_key: ?[]const u8) TurnUdpSocketError!bool {
+    pub fn on_server_stun(self: *TurnUdpSocket, view: parser.MessageView, now_ms: u64, integrity_key: ?[]const u8) TurnUdpSocketError!ServerStunOutcome {
         if (usage_turn.is_allocate_success_response(view)) {
             try self.on_allocate_success(view, now_ms, integrity_key);
-            return true;
+            return .handled;
         }
         if (usage_turn.is_refresh_success_response(view)) {
             try self.on_refresh_success(view, now_ms, integrity_key);
-            return true;
+            return .handled;
         }
         if (view.header.message_type == usage_turn.create_permission_success_response_type) {
             const handled = try self.on_permission_refresh_success(view.header.transaction_id, now_ms);
-            return handled;
+            return if (handled) .handled else .ignored;
         }
         if (view.header.message_type == usage_turn.channel_bind_success_response_type) {
             const handled = try self.on_channel_bind_refresh_success(view.header.transaction_id, now_ms);
-            return handled;
+            return if (handled) .handled else .ignored;
         }
         if (view.header.message_type == usage_turn.allocate_error_response_type or
             view.header.message_type == usage_turn.refresh_error_response_type or
@@ -168,7 +174,7 @@ pub const TurnUdpSocket = struct {
         {
             return try self.on_server_error(view);
         }
-        return false;
+        return .ignored;
     }
 
     pub fn has_auth_retry_required(self: *const TurnUdpSocket) bool {
@@ -189,18 +195,19 @@ pub const TurnUdpSocket = struct {
         return self.auth_nonce.items;
     }
 
-    fn on_server_error(self: *TurnUdpSocket, view: parser.MessageView) !bool {
-        const code = (try usage_turn.read_error_code(view)) orelse return false;
+    fn on_server_error(self: *TurnUdpSocket, view: parser.MessageView) !ServerStunOutcome {
+        const code = (try usage_turn.read_error_code(view)) orelse return .ignored;
         _ = self.take_pending_refresh(view.header.transaction_id);
 
         if (code == 401 or code == 438) {
-            const realm = (try usage_turn.read_realm(view)) orelse return false;
-            const nonce = (try usage_turn.read_nonce(view)) orelse return false;
+            const realm = (try usage_turn.read_realm(view)) orelse return .ignored;
+            const nonce = (try usage_turn.read_nonce(view)) orelse return .ignored;
             try self.set_auth_challenge(realm, nonce);
             self.auth_retry_required = true;
+            return .auth_challenge_required;
         }
 
-        return true;
+        return .handled;
     }
 
     fn set_auth_challenge(self: *TurnUdpSocket, realm: []const u8, nonce: []const u8) !void {
@@ -551,7 +558,7 @@ test "turn udp socket applies permission and channel success responses" {
     const perm_header = @import("../protocol/stun/message.zig").Header.init(usage_turn.create_permission_success_response_type, 0, tx_perm);
     _ = try perm_header.encode(&packet_perm);
     const perm_view = try parser.parse_message(packet_perm[0..20]);
-    try std.testing.expect(try turn.on_server_stun(perm_view, 5_000, null));
+    try std.testing.expectEqual(TurnUdpSocket.ServerStunOutcome.handled, try turn.on_server_stun(perm_view, 5_000, null));
     try std.testing.expectEqual(@as(usize, 1), turn.permission_count());
     try std.testing.expectEqual(@as(u64, 305_000), turn.permissions.items[0].expires_at_ms);
 
@@ -561,7 +568,7 @@ test "turn udp socket applies permission and channel success responses" {
     const channel_header = @import("../protocol/stun/message.zig").Header.init(usage_turn.channel_bind_success_response_type, 0, tx_channel);
     _ = try channel_header.encode(&packet_channel);
     const channel_view = try parser.parse_message(packet_channel[0..20]);
-    try std.testing.expect(try turn.on_server_stun(channel_view, 8_000, null));
+    try std.testing.expectEqual(TurnUdpSocket.ServerStunOutcome.handled, try turn.on_server_stun(channel_view, 8_000, null));
     try std.testing.expectEqual(@as(usize, 1), turn.channel_binding_count());
     try std.testing.expectEqual(@as(u64, 608_000), turn.channels.items[0].expires_at_ms);
 }
@@ -584,7 +591,7 @@ test "turn udp socket captures auth challenge from stale nonce error" {
     const bytes = try builder.finish();
     const view = try parser.parse_message(bytes);
 
-    try std.testing.expect(try turn.on_server_stun(view, 0, null));
+    try std.testing.expectEqual(TurnUdpSocket.ServerStunOutcome.auth_challenge_required, try turn.on_server_stun(view, 0, null));
     try std.testing.expect(turn.has_auth_retry_required());
     try std.testing.expectEqualStrings("example.org", turn.auth_realm_value().?);
     try std.testing.expectEqualStrings("new-nonce", turn.auth_nonce_value().?);

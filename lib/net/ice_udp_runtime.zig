@@ -51,6 +51,8 @@ pub const BidirectionalAdvanceSummary = struct {
     completed_checks: usize,
     requests_handled: usize,
     ignored_packets: usize,
+    turn_control_handled: usize,
+    turn_auth_challenges: usize,
     timed_out_checks: usize,
     failed_consents: usize,
 };
@@ -114,6 +116,8 @@ pub const PumpOnceSummary = struct {
     completed_checks: usize,
     requests_handled: usize,
     ignored_packets: usize,
+    turn_control_handled: usize,
+    turn_auth_challenges: usize,
     timed_out_checks: usize,
     failed_consents: usize,
     events_drained: usize,
@@ -148,6 +152,8 @@ pub const DriveLoopSummary = struct {
     total_completed_checks: usize,
     total_requests_handled: usize,
     total_ignored_packets: usize,
+    total_turn_control_handled: usize,
+    total_turn_auth_challenges: usize,
     total_timed_out_checks: usize,
     total_failed_consents: usize,
     total_events_drained: usize,
@@ -421,6 +427,8 @@ pub const IceUdpRuntimeBridge = struct {
             .completed_checks = 0,
             .requests_handled = 0,
             .ignored_packets = 0,
+            .turn_control_handled = 0,
+            .turn_auth_challenges = 0,
             .timed_out_checks = 0,
             .failed_consents = 0,
         };
@@ -473,6 +481,8 @@ pub const IceUdpRuntimeBridge = struct {
         summary.completed_checks += turn_result.completed_checks;
         summary.requests_handled += turn_result.requests_handled;
         summary.ignored_packets += turn_result.ignored_packets;
+        summary.turn_control_handled += turn_result.control_handled;
+        summary.turn_auth_challenges += turn_result.auth_challenges;
 
         summary.timed_out_checks = try self.runtime.expire_all(now_ms, out_timed_out);
         summary.failed_consents = self.runtime.tick_consent_all(now_ms).failed_components;
@@ -556,6 +566,8 @@ pub const IceUdpRuntimeBridge = struct {
         var total_completed_checks: usize = 0;
         var total_requests_handled: usize = 0;
         var total_ignored_packets: usize = 0;
+        var total_turn_control_handled: usize = 0;
+        var total_turn_auth_challenges: usize = 0;
         var total_timed_out_checks: usize = 0;
         var total_failed_consents: usize = 0;
         var total_events_drained: usize = 0;
@@ -584,6 +596,8 @@ pub const IceUdpRuntimeBridge = struct {
             total_completed_checks += tick.advance.completed_checks;
             total_requests_handled += tick.advance.requests_handled;
             total_ignored_packets += tick.advance.ignored_packets;
+            total_turn_control_handled += tick.advance.turn_control_handled;
+            total_turn_auth_challenges += tick.advance.turn_auth_challenges;
             total_timed_out_checks += tick.advance.timed_out_checks;
             total_failed_consents += tick.advance.failed_consents;
             total_events_drained += events_drained;
@@ -605,6 +619,8 @@ pub const IceUdpRuntimeBridge = struct {
                     .total_completed_checks = total_completed_checks,
                     .total_requests_handled = total_requests_handled,
                     .total_ignored_packets = total_ignored_packets,
+                    .total_turn_control_handled = total_turn_control_handled,
+                    .total_turn_auth_challenges = total_turn_auth_challenges,
                     .total_timed_out_checks = total_timed_out_checks,
                     .total_failed_consents = total_failed_consents,
                     .total_events_drained = total_events_drained,
@@ -633,6 +649,8 @@ pub const IceUdpRuntimeBridge = struct {
             .total_completed_checks = total_completed_checks,
             .total_requests_handled = total_requests_handled,
             .total_ignored_packets = total_ignored_packets,
+            .total_turn_control_handled = total_turn_control_handled,
+            .total_turn_auth_challenges = total_turn_auth_challenges,
             .total_timed_out_checks = total_timed_out_checks,
             .total_failed_consents = total_failed_consents,
             .total_events_drained = total_events_drained,
@@ -703,6 +721,8 @@ pub const IceUdpRuntimeBridge = struct {
             .completed_checks = tick.io.advance.completed_checks,
             .requests_handled = tick.io.advance.requests_handled,
             .ignored_packets = tick.io.advance.ignored_packets,
+            .turn_control_handled = tick.io.advance.turn_control_handled,
+            .turn_auth_challenges = tick.io.advance.turn_auth_challenges,
             .timed_out_checks = tick.io.advance.timed_out_checks,
             .failed_consents = tick.io.advance.failed_consents,
             .events_drained = tick.events_drained,
@@ -903,6 +923,8 @@ pub const IceUdpRuntimeBridge = struct {
         completed_checks: usize,
         requests_handled: usize,
         ignored_packets: usize,
+        control_handled: usize,
+        auth_challenges: usize,
     };
 
     fn drain_turn_packets(
@@ -919,6 +941,8 @@ pub const IceUdpRuntimeBridge = struct {
             .completed_checks = 0,
             .requests_handled = 0,
             .ignored_packets = 0,
+            .control_handled = 0,
+            .auth_challenges = 0,
         };
 
         for (self.turn_bindings.items) |*binding| {
@@ -964,8 +988,15 @@ pub const IceUdpRuntimeBridge = struct {
                         summary.completed_checks += 1;
                     },
                     .stun => |view| {
-                        const handled = try binding.socket.on_server_stun(view, now_ms, null);
-                        if (!handled) summary.ignored_packets += 1;
+                        const outcome = try binding.socket.on_server_stun(view, now_ms, null);
+                        switch (outcome) {
+                            .ignored => summary.ignored_packets += 1,
+                            .handled => summary.control_handled += 1,
+                            .auth_challenge_required => {
+                                summary.control_handled += 1;
+                                summary.auth_challenges += 1;
+                            },
+                        }
                     },
                     else => {
                         summary.ignored_packets += 1;
@@ -2433,5 +2464,68 @@ test "udp bridge retries TURN maintenance with server auth challenge" {
     try std.testing.expectEqual(@as(u16, usage_turn.refresh_request_type), retry_view.header.message_type);
     try std.testing.expectEqualStrings("example.org", (try usage_turn.read_realm(retry_view)).?);
     try std.testing.expectEqualStrings("new-nonce", (try usage_turn.read_nonce(retry_view)).?);
+    try std.testing.expect(!binding.socket.has_auth_retry_required());
+}
+
+test "udp bridge retries TURN allocate bootstrap with auth challenge" {
+    const encoder = @import("../protocol/stun/encoder.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+
+    var prng = std.Random.DefaultPrng.init(53);
+    var packet_buf: [512]u8 = undefined;
+    const first = try bridge.run_turn_maintenance(prng.random(), 0, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), first.allocations_requested);
+
+    var recv: [512]u8 = undefined;
+    const req1 = try turn_server.recv_from(&recv);
+    const req1_view = try parser.parse_message(recv[0..req1.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.allocate_request_type), req1_view.header.message_type);
+
+    var err_buf: [256]u8 = undefined;
+    var err_builder = try encoder.Builder.init(&err_buf, usage_turn.allocate_error_response_type, req1_view.header.transaction_id);
+    const err_401 = [_]u8{ 0x00, 0x00, 0x04, 0x01 };
+    try err_builder.add_attr(usage_turn.error_code_attr_type, &err_401);
+    try err_builder.add_attr(usage_turn.realm_attr_type, "example.org");
+    try err_builder.add_attr(usage_turn.nonce_attr_type, "nonce-2");
+    const err_packet = try err_builder.finish();
+    _ = try turn_server.send_to(req1.from, err_packet);
+
+    var recv_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    var timed_out: [1]ice_runtime.TimedOutCheck = undefined;
+    const advanced = try bridge.advance_bidirectional(10, &recv_buf, &send_buf, &completed, &timed_out, .{});
+    try std.testing.expectEqual(@as(usize, 1), advanced.turn_auth_challenges);
+    try std.testing.expect(binding.socket.has_auth_retry_required());
+
+    _ = try bridge.run_turn_maintenance(prng.random(), 20, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u" },
+    });
+    const req2 = try turn_server.recv_from(&recv);
+    const req2_view = try parser.parse_message(recv[0..req2.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.allocate_request_type), req2_view.header.message_type);
+    try std.testing.expectEqualStrings("example.org", (try usage_turn.read_realm(req2_view)).?);
+    try std.testing.expectEqualStrings("nonce-2", (try usage_turn.read_nonce(req2_view)).?);
     try std.testing.expect(!binding.socket.has_auth_retry_required());
 }
