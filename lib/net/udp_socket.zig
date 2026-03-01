@@ -7,6 +7,14 @@ pub const UdpSocket = struct {
     local: std.net.Address,
 
     pub fn bind(local: candidate.Address) !UdpSocket {
+        return bind_with_flags(local, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC);
+    }
+
+    pub fn bind_nonblocking(local: candidate.Address) !UdpSocket {
+        return bind_with_flags(local, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK);
+    }
+
+    fn bind_with_flags(local: candidate.Address, sock_flags: u32) !UdpSocket {
         const std_addr = addr_conv.to_std(local);
 
         const domain: u32 = switch (std_addr.any.family) {
@@ -15,7 +23,7 @@ pub const UdpSocket = struct {
             else => return error.UnsupportedAddressFamily,
         };
 
-        const fd = try std.posix.socket(domain, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+        const fd = try std.posix.socket(domain, sock_flags, std.posix.IPPROTO.UDP);
         errdefer std.posix.close(fd);
 
         try std.posix.bind(fd, &std_addr.any, std_addr.getOsSockLen());
@@ -77,4 +85,12 @@ test "udp socket local address contains bound port" {
 
     const addr = try sock.local_address();
     try std.testing.expect(addr.ipv4.port != 0);
+}
+
+test "udp nonblocking socket returns wouldblock when idle" {
+    var sock = try UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer sock.deinit();
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectError(error.WouldBlock, sock.recv_from(&buf));
 }

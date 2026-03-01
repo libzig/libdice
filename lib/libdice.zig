@@ -123,6 +123,8 @@ pub const net_to_std_address = @import("net/address.zig").to_std;
 pub const net_from_std_address = @import("net/address.zig").from_std;
 pub const net_parse_ip_port = @import("net/address.zig").parse_ip_port;
 pub const UdpSocket = @import("net/udp_socket.zig").UdpSocket;
+pub const UdpDispatch = @import("net/udp_dispatch.zig").UdpDispatch;
+pub const UdpReceivedPacket = @import("net/udp_dispatch.zig").ReceivedPacket;
 
 pub const version = "0.0.1";
 
@@ -590,6 +592,14 @@ test "net exports are reachable" {
     const std_addr = net_to_std_address(addr);
     const roundtrip = try net_from_std_address(std_addr);
     try std.testing.expect(CandidateAddress.eql(addr, roundtrip));
+
+    var dispatch = UdpDispatch.init(std.testing.allocator);
+    defer dispatch.deinit();
+    _ = try dispatch.add_binding(1, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+
+    var recv_buf: [64]u8 = undefined;
+    const pkt: ?UdpReceivedPacket = try dispatch.recv_any(&recv_buf);
+    try std.testing.expectEqual(@as(?UdpReceivedPacket, null), pkt);
 }
 
 test "turn channel data exports are reachable" {
