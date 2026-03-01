@@ -56,6 +56,8 @@ pub const BidirectionalAdvanceSummary = struct {
 };
 
 pub const TurnMaintenanceOptions = struct {
+    allocate_if_missing: bool = false,
+    allocate_options: usage_turn.AllocateRequestOptions = .{},
     allocation_refresh_margin_ms: u64 = 60_000,
     permission_refresh_margin_ms: u64 = 60_000,
     channel_refresh_margin_ms: u64 = 60_000,
@@ -68,6 +70,7 @@ pub const TurnMaintenanceOptions = struct {
 };
 
 pub const TurnMaintenanceSummary = struct {
+    allocations_requested: usize,
     allocation_refreshes_sent: usize,
     permission_refreshes_sent: usize,
     channel_refreshes_sent: usize,
@@ -75,7 +78,7 @@ pub const TurnMaintenanceSummary = struct {
     channels_pruned: usize,
 
     pub fn total_sent(self: TurnMaintenanceSummary) usize {
-        return self.allocation_refreshes_sent + self.permission_refreshes_sent + self.channel_refreshes_sent;
+        return self.allocations_requested + self.allocation_refreshes_sent + self.permission_refreshes_sent + self.channel_refreshes_sent;
     }
 };
 
@@ -805,6 +808,7 @@ pub const IceUdpRuntimeBridge = struct {
         options: TurnMaintenanceOptions,
     ) !TurnMaintenanceSummary {
         var summary = TurnMaintenanceSummary{
+            .allocations_requested = 0,
             .allocation_refreshes_sent = 0,
             .permission_refreshes_sent = 0,
             .channel_refreshes_sent = 0,
@@ -813,6 +817,12 @@ pub const IceUdpRuntimeBridge = struct {
         };
 
         for (self.turn_bindings.items) |*binding| {
+            if (binding.socket.allocation == null and options.allocate_if_missing) {
+                const tx_id = stun_tx_from_rng(random);
+                _ = try binding.socket.send_allocate_request(packet_buf, tx_id, options.allocate_options);
+                summary.allocations_requested += 1;
+            }
+
             if (binding.socket.allocation) |lease| {
                 if (now_ms >= lease.refresh_due_at_ms(options.allocation_refresh_margin_ms)) {
                     const tx_id = stun_tx_from_rng(random);
@@ -2100,6 +2110,7 @@ test "udp bridge turn maintenance sends refresh requests and prunes expired entr
         .nonce = "n",
     });
 
+    try std.testing.expectEqual(@as(usize, 0), summary.allocations_requested);
     try std.testing.expectEqual(@as(usize, 1), summary.allocation_refreshes_sent);
     try std.testing.expectEqual(@as(usize, 1), summary.permission_refreshes_sent);
     try std.testing.expectEqual(@as(usize, 1), summary.channel_refreshes_sent);
@@ -2127,6 +2138,40 @@ test "udp bridge turn maintenance sends refresh requests and prunes expired entr
     try std.testing.expectEqual(@as(usize, 1), refresh_count);
     try std.testing.expectEqual(@as(usize, 1), permission_count);
     try std.testing.expectEqual(@as(usize, 1), channel_bind_count);
+}
+
+test "udp bridge turn maintenance can request allocate when missing" {
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    var prng = std.Random.DefaultPrng.init(50);
+    var packet_buf: [512]u8 = undefined;
+    const summary = try bridge.run_turn_maintenance(prng.random(), 0, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u", .realm = "r", .nonce = "n" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), summary.allocations_requested);
+
+    var recv: [512]u8 = undefined;
+    const got = turn_server.recv_from(&recv) catch |err| switch (err) {
+        error.WouldBlock => return error.ExpectedAllocateRequest,
+        else => return err,
+    };
+    const view = try parser.parse_message(recv[0..got.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.allocate_request_type), view.header.message_type);
 }
 
 test "udp bridge io tick reports turn maintenance sends" {
