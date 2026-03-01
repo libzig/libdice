@@ -30,6 +30,11 @@ pub const StreamConnectivityStats = struct {
     failed_components: usize,
 };
 
+pub const StreamEvent = struct {
+    component_id: u16,
+    event: connectivity_engine.Event,
+};
+
 pub const StreamConnectivityRuntime = struct {
     allocator: std.mem.Allocator,
     stream_id: u32,
@@ -158,6 +163,22 @@ pub const StreamConnectivityRuntime = struct {
             .ready_components = ready_components,
             .failed_components = failed_components,
         };
+    }
+
+    pub fn drain_events(self: *StreamConnectivityRuntime, out: []StreamEvent) usize {
+        var written: usize = 0;
+        for (self.engines.items) |*engine| {
+            while (engine.pop_event()) |event| {
+                if (written < out.len) {
+                    out[written] = .{
+                        .component_id = engine.component.id,
+                        .event = event,
+                    };
+                }
+                written += 1;
+            }
+        }
+        return written;
     }
 
     pub fn start_next_check_for_component(
@@ -412,4 +433,33 @@ test "stream connectivity runtime stats snapshot" {
     try std.testing.expectEqual(@as(usize, 2), snapshot.component_count);
     try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
     try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
+}
+
+test "stream connectivity runtime drains component events" {
+    const component_ids = [_]u16{1};
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 61, &component_ids, .{}, .{}, .aggressive);
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 901,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(27);
+    const tx_id = (try runtime.start_next_check_for_component(1, prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try runtime.on_response(1, view, 12);
+
+    var events: [16]StreamEvent = undefined;
+    const count = runtime.drain_events(&events);
+    try std.testing.expect(count >= 2);
 }

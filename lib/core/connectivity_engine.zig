@@ -14,6 +14,36 @@ pub const PairContext = struct {
     nominated: bool,
 };
 
+pub const Event = union(enum) {
+    state_changed: struct {
+        from: component_mod.ComponentState,
+        to: component_mod.ComponentState,
+    },
+    check_started: struct {
+        pair_id: u64,
+        transaction_id: transaction.TransactionId,
+        at_ms: u64,
+    },
+    check_succeeded: struct {
+        pair_id: u64,
+        transaction_id: transaction.TransactionId,
+        rtt_ms: u64,
+        nominated: bool,
+    },
+    check_failed: struct {
+        pair_id: u64,
+        transaction_id: transaction.TransactionId,
+        is_error_response: bool,
+    },
+    check_timed_out: struct {
+        pair_id: u64,
+    },
+    consent_failed: struct {
+        pair_id: ?u64,
+    },
+    restarted: void,
+};
+
 pub const ConnectivityEngineStats = struct {
     component_id: u16,
     component_state: component_mod.ComponentState,
@@ -37,6 +67,7 @@ pub const ComponentConnectivityEngine = struct {
     consent: consent_mod.ConsentTracker,
     nomination_mode: nomination.NominationMode,
     requested_nomination_pair_id: ?u64,
+    events: std.ArrayList(Event),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -56,13 +87,33 @@ pub const ComponentConnectivityEngine = struct {
             .consent = consent_mod.ConsentTracker.init(consent_config),
             .nomination_mode = nomination_mode,
             .requested_nomination_pair_id = null,
+            .events = .empty,
         };
     }
 
     pub fn deinit(self: *ComponentConnectivityEngine) void {
+        self.events.deinit(self.allocator);
         self.pair_contexts.deinit();
         self.tracker.deinit();
         self.checklist.deinit();
+    }
+
+    fn emit(self: *ComponentConnectivityEngine, event: Event) !void {
+        try self.events.append(self.allocator, event);
+    }
+
+    fn emit_state_if_changed(
+        self: *ComponentConnectivityEngine,
+        before: component_mod.ComponentState,
+    ) !void {
+        if (before != self.component.state) {
+            try self.emit(.{ .state_changed = .{ .from = before, .to = self.component.state } });
+        }
+    }
+
+    pub fn pop_event(self: *ComponentConnectivityEngine) ?Event {
+        if (self.events.items.len == 0) return null;
+        return self.events.orderedRemove(0);
     }
 
     pub fn add_pair(self: *ComponentConnectivityEngine, pair: checklist_mod.Pair, context: PairContext) !void {
@@ -78,12 +129,15 @@ pub const ComponentConnectivityEngine = struct {
     }
 
     pub fn start_connecting(self: *ComponentConnectivityEngine) !void {
+        const before = self.component.state;
         if (self.component.state == .disconnected) {
             try self.component.start_connecting();
+            try self.emit_state_if_changed(before);
             return;
         }
         if (self.component.state == .gathering) {
             try self.component.start_connecting();
+            try self.emit_state_if_changed(before);
             return;
         }
     }
@@ -107,6 +161,12 @@ pub const ComponentConnectivityEngine = struct {
             .is_nominated = ctx.nominated,
         });
 
+        try self.emit(.{ .check_started = .{
+            .pair_id = pair.?.id,
+            .transaction_id = tx_id,
+            .at_ms = now_ms,
+        } });
+
         return tx_id;
     }
 
@@ -119,11 +179,18 @@ pub const ComponentConnectivityEngine = struct {
     }
 
     pub fn on_response(self: *ComponentConnectivityEngine, view: parser.MessageView, now_ms: u64) !conncheck.CompletedCheck {
+        const before_state = self.component.state;
         const completed = try self.tracker.on_response(view, now_ms);
 
         if (completed.is_error_response) {
             try self.checklist.mark_failed(completed.meta.candidate_pair_id);
             self.evaluate_failure_state();
+            try self.emit(.{ .check_failed = .{
+                .pair_id = completed.meta.candidate_pair_id,
+                .transaction_id = completed.transaction_id,
+                .is_error_response = true,
+            } });
+            try self.emit_state_if_changed(before_state);
             return completed;
         }
 
@@ -145,16 +212,27 @@ pub const ComponentConnectivityEngine = struct {
             self.consent.arm(completed.meta.candidate_pair_id, now_ms);
         }
 
+        try self.emit(.{ .check_succeeded = .{
+            .pair_id = completed.meta.candidate_pair_id,
+            .transaction_id = completed.transaction_id,
+            .rtt_ms = completed.rtt_ms,
+            .nominated = nominated,
+        } });
+        try self.emit_state_if_changed(before_state);
+
         return completed;
     }
 
     pub fn expire_timeouts(self: *ComponentConnectivityEngine, now_ms: u64, out: []conncheck.TimedOutCheck) !usize {
+        const before_state = self.component.state;
         const removed = try self.tracker.expire_checks(now_ms, out);
         for (out[0..@min(out.len, removed)]) |timed_out| {
             _ = self.checklist.mark_failed(timed_out.meta.candidate_pair_id) catch {};
+            try self.emit(.{ .check_timed_out = .{ .pair_id = timed_out.meta.candidate_pair_id } });
         }
 
         if (removed > 0) self.evaluate_failure_state();
+        try self.emit_state_if_changed(before_state);
         return removed;
     }
 
@@ -194,8 +272,14 @@ pub const ComponentConnectivityEngine = struct {
     }
 
     pub fn tick_consent(self: *ComponentConnectivityEngine, now_ms: u64) bool {
+        const before_state = self.component.state;
         const failed = self.consent.on_tick(now_ms);
-        if (failed) self.component.mark_failed();
+        if (failed) {
+            self.component.mark_failed();
+            const pair_id = self.consent.pair_id;
+            self.emit(.{ .consent_failed = .{ .pair_id = pair_id } }) catch {};
+            self.emit_state_if_changed(before_state) catch {};
+        }
         return failed;
     }
 
@@ -217,6 +301,7 @@ pub const ComponentConnectivityEngine = struct {
     }
 
     pub fn reset_for_restart(self: *ComponentConnectivityEngine) !void {
+        const before_state = self.component.state;
         self.checklist.clear();
         self.tracker.clear();
         self.pair_contexts.clearRetainingCapacity();
@@ -224,6 +309,8 @@ pub const ComponentConnectivityEngine = struct {
         self.requested_nomination_pair_id = null;
         self.component.reset();
         try self.start_connecting();
+        try self.emit(.{ .restarted = {} });
+        try self.emit_state_if_changed(before_state);
     }
 };
 
@@ -474,4 +561,40 @@ test "connectivity engine stats snapshot" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.pair_count);
     try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
     try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
+}
+
+test "connectivity engine emits events" {
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 9, 1, .{}, .{}, .aggressive);
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 900,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(26);
+    const tx_id = (try engine.start_next_check(prng.random(), 0)).?;
+
+    var packet: [message.header_size]u8 = undefined;
+    const header = message.Header.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try engine.on_response(view, 10);
+
+    var saw_started = false;
+    var saw_succeeded = false;
+    while (engine.pop_event()) |event| {
+        switch (event) {
+            .check_started => saw_started = true,
+            .check_succeeded => saw_succeeded = true,
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_started);
+    try std.testing.expect(saw_succeeded);
 }

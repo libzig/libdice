@@ -33,6 +33,12 @@ pub const IceRuntimeStats = struct {
     failed_components: usize,
 };
 
+pub const IceEvent = struct {
+    stream_id: u32,
+    component_id: u16,
+    event: @import("stream_connectivity.zig").StreamEvent,
+};
+
 pub const ConsentTickSummary = struct {
     failed_components: usize,
 };
@@ -259,6 +265,25 @@ pub const IceRuntime = struct {
             .ready_components = ready_components,
             .failed_components = failed_components,
         };
+    }
+
+    pub fn drain_events(self: *IceRuntime, out: []IceEvent) usize {
+        var written: usize = 0;
+        for (self.entries.items) |*entry| {
+            var stream_events: [32]stream_connectivity.StreamEvent = undefined;
+            const count = entry.runtime.drain_events(&stream_events);
+            for (stream_events[0..@min(stream_events.len, count)]) |stream_event| {
+                if (written < out.len) {
+                    out[written] = .{
+                        .stream_id = entry.stream_id,
+                        .component_id = stream_event.component_id,
+                        .event = stream_event,
+                    };
+                }
+                written += 1;
+            }
+        }
+        return written;
     }
 };
 
@@ -574,4 +599,50 @@ test "ice runtime stats snapshot" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.component_count);
     try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
     try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
+}
+
+test "ice runtime drains stream events" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 102 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 102 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .aggressive);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 8100);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(28);
+    const started = (try runtime.start_next_check_any(prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, started.transaction_id);
+    _ = try header.encode(&packet);
+    const view = try parser.parse_message(&packet);
+    _ = try runtime.on_response(started.stream_id, started.component_id, view, 10);
+
+    var events: [64]IceEvent = undefined;
+    const count = runtime.drain_events(&events);
+    try std.testing.expect(count >= 2);
 }
