@@ -30,6 +30,7 @@ pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
 pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
 pub const IceRuntimeStartedCheckDetailed = @import("core/ice_runtime.zig").StartedCheckDetailed;
 pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
+pub const IceRuntimeRemoteExpandSummary = @import("core/ice_runtime.zig").RemoteExpandSummary;
 pub const IceRuntimeRestartSummary = @import("core/ice_runtime.zig").RestartSummary;
 pub const IceRuntimeRemoteBatchExpandSummary = @import("core/ice_runtime.zig").RemoteBatchExpandSummary;
 pub const IceRuntimeChecklistPopulateOptions = @import("core/ice_runtime.zig").ChecklistPopulateOptions;

@@ -66,6 +66,11 @@ pub const RemoteBatchExpandSummary = struct {
     next_pair_id: u64,
 };
 
+pub const RemoteExpandSummary = struct {
+    remote_added: bool,
+    pair_summary: pair_builder.PairBuildSummary,
+};
+
 pub const ChecklistPopulateOptions = struct {
     policy: pair_builder.PairBuildPolicy = .all,
 };
@@ -189,10 +194,20 @@ pub const IceRuntime = struct {
     }
 
     pub fn restart_stream(self: *IceRuntime, stream_id: u32, controlling: bool, start_pair_id: u64) !RestartSummary {
+        return self.restart_stream_with_options(stream_id, controlling, start_pair_id, .{});
+    }
+
+    pub fn restart_stream_with_options(
+        self: *IceRuntime,
+        stream_id: u32,
+        controlling: bool,
+        start_pair_id: u64,
+        options: ChecklistPopulateOptions,
+    ) !RestartSummary {
         const entry = self.find_entry(stream_id) orelse return error.NotFound;
         try entry.runtime.reset_for_restart();
 
-        const pair_summary = try self.populate_stream_checklists(stream_id, controlling, start_pair_id);
+        const pair_summary = try self.populate_stream_checklists_with_options(stream_id, controlling, start_pair_id, options);
         return .{
             .stream_id = stream_id,
             .pair_summary = pair_summary,
@@ -205,12 +220,20 @@ pub const IceRuntime = struct {
         remote_candidate: candidate.Candidate,
         controlling: bool,
         start_pair_id: u64,
-    ) !struct {
-        remote_added: bool,
-        pair_summary: pair_builder.PairBuildSummary,
-    } {
+    ) !RemoteExpandSummary {
+        return self.add_remote_candidate_and_expand_with_options(stream_id, remote_candidate, controlling, start_pair_id, .{});
+    }
+
+    pub fn add_remote_candidate_and_expand_with_options(
+        self: *IceRuntime,
+        stream_id: u32,
+        remote_candidate: candidate.Candidate,
+        controlling: bool,
+        start_pair_id: u64,
+        options: ChecklistPopulateOptions,
+    ) !RemoteExpandSummary {
         const remote_added = try self.agent.add_remote_candidate(stream_id, remote_candidate);
-        const pair_summary = try self.populate_stream_checklists(stream_id, controlling, start_pair_id);
+        const pair_summary = try self.populate_stream_checklists_with_options(stream_id, controlling, start_pair_id, options);
 
         return .{
             .remote_added = remote_added,
@@ -225,17 +248,29 @@ pub const IceRuntime = struct {
         controlling: bool,
         start_pair_id: u64,
     ) !RemoteBatchExpandSummary {
+        return self.add_remote_candidates_and_expand_with_options(stream_id, remote_candidates, controlling, start_pair_id, .{});
+    }
+
+    pub fn add_remote_candidates_and_expand_with_options(
+        self: *IceRuntime,
+        stream_id: u32,
+        remote_candidates: []const candidate.Candidate,
+        controlling: bool,
+        start_pair_id: u64,
+        options: ChecklistPopulateOptions,
+    ) !RemoteBatchExpandSummary {
         var next_pair_id = start_pair_id;
         var processed: usize = 0;
         var remote_added_count: usize = 0;
         var new_pairs: usize = 0;
 
         for (remote_candidates) |remote_candidate| {
-            const summary = try self.add_remote_candidate_and_expand(
+            const summary = try self.add_remote_candidate_and_expand_with_options(
                 stream_id,
                 remote_candidate,
                 controlling,
                 next_pair_id,
+                options,
             );
             processed += 1;
             if (summary.remote_added) remote_added_count += 1;
@@ -567,6 +602,80 @@ test "ice runtime remote batch expansion" {
     try std.testing.expectEqual(@as(usize, 2), summary.remote_added);
     try std.testing.expectEqual(@as(usize, 2), summary.new_pairs);
     try std.testing.expectEqual(@as(u64, 9002), summary.next_pair_id);
+}
+
+test "ice runtime remote expansion supports force-relay policy" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_host: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 170 }, .port = 5000 } };
+    const local_relay: candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 170 }, .port = 5100 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_host),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_host,
+    }));
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, local_relay),
+        .priority = candidate.compute_candidate_priority(.relay, 10, 1),
+        .address = local_relay,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    const host_remote: candidate.Candidate = .{
+        .id = 20,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 170 }, .port = 6000 } }),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 170 }, .port = 6000 } },
+    };
+
+    const first = try runtime.add_remote_candidate_and_expand_with_options(
+        stream_id,
+        host_remote,
+        true,
+        13_000,
+        .{ .policy = .force_relay },
+    );
+    try std.testing.expect(first.remote_added);
+    try std.testing.expectEqual(@as(usize, 1), first.pair_summary.generated);
+    try std.testing.expectEqual(@as(usize, 1), first.pair_summary.added);
+
+    const relay_remote: candidate.Candidate = .{
+        .id = 21,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 171 }, .port = 6001 } }),
+        .priority = candidate.compute_candidate_priority(.relay, 11, 1),
+        .address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 171 }, .port = 6001 } },
+    };
+
+    const second = try runtime.add_remote_candidate_and_expand_with_options(
+        stream_id,
+        relay_remote,
+        true,
+        first.pair_summary.next_pair_id,
+        .{ .policy = .force_relay },
+    );
+    try std.testing.expect(second.remote_added);
+    try std.testing.expectEqual(@as(usize, 3), second.pair_summary.generated);
+    try std.testing.expectEqual(@as(usize, 2), second.pair_summary.added);
 }
 
 test "ice runtime timeout aggregation across streams" {
