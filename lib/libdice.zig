@@ -50,11 +50,16 @@ pub const checklist_compute_pair_priority = @import("core/checklist.zig").comput
 pub const Agent = @import("core/agent.zig").Agent;
 pub const Stream = @import("core/stream.zig").Stream;
 pub const Credentials = @import("core/stream.zig").Credentials;
+pub const CandidateExchangeParsedDescription = @import("core/candidate_exchange.zig").ParsedDescription;
 pub const StreamDescription = @import("core/signaling.zig").StreamDescription;
 pub const RemoteDescription = @import("core/signaling.zig").RemoteDescription;
 pub const ApplySummary = @import("core/signaling.zig").ApplySummary;
 pub const build_local_description = @import("core/signaling.zig").build_local_description;
 pub const apply_remote_description = @import("core/signaling.zig").apply_remote_description;
+pub const candidate_exchange_encode_candidate_line = @import("core/candidate_exchange.zig").encode_candidate_line;
+pub const candidate_exchange_parse_candidate_line = @import("core/candidate_exchange.zig").parse_candidate_line;
+pub const candidate_exchange_encode_description = @import("core/candidate_exchange.zig").encode_description;
+pub const candidate_exchange_parse_description = @import("core/candidate_exchange.zig").parse_description;
 pub const Candidate = @import("core/candidate.zig").Candidate;
 pub const CandidateType = @import("core/candidate.zig").CandidateType;
 pub const CandidateTransport = @import("core/candidate.zig").Transport;
@@ -731,4 +736,28 @@ test "bytestream hook exports are reachable" {
     dispatcher.emit_data(1, 1, "hi");
     dispatcher.emit_closed(1, 1);
     try std.testing.expect(dispatcher.mode == BytestreamMode.opportunistic);
+}
+
+test "candidate exchange exports are reachable" {
+    const item = Candidate{
+        .id = 77,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = 10,
+        .priority = 20,
+        .address = .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 5000 } },
+    };
+
+    var line_buf: [256]u8 = undefined;
+    const line = try candidate_exchange_encode_candidate_line(&line_buf, item);
+    const parsed = try candidate_exchange_parse_candidate_line(line);
+    try std.testing.expectEqual(@as(u64, 77), parsed.id);
+
+    const encoded = try candidate_exchange_encode_description(std.testing.allocator, null, &[_]Candidate{item});
+    defer std.testing.allocator.free(encoded);
+
+    var parsed_desc = try candidate_exchange_parse_description(std.testing.allocator, encoded);
+    defer parsed_desc.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), parsed_desc.candidates.len);
 }
