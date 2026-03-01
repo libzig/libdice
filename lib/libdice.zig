@@ -5,6 +5,7 @@ pub const EventTask = @import("core/events.zig").Task;
 pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
 pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
+pub const StunHeader = @import("protocol/stun/message.zig").Header;
 
 pub const version = "0.0.1";
 
@@ -38,4 +39,10 @@ test "timer wheel export is reachable" {
     defer wheel.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), wheel.pending_count());
+}
+
+test "stun header export is reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    const header = StunHeader.init(0x0001, 0, tx_id);
+    try std.testing.expectEqual(@as(u16, 0x0001), header.message_type);
 }
