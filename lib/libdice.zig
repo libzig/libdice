@@ -14,6 +14,8 @@ pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairCon
 pub const StreamConnectivityRuntime = @import("core/stream_connectivity.zig").StreamConnectivityRuntime;
 pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCheck;
 pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
+pub const PairBuildSummary = @import("core/pair_builder.zig").PairBuildSummary;
+pub const populate_stream_checklists = @import("core/pair_builder.zig").populate_stream_checklists;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -197,6 +199,41 @@ test "stream connectivity runtime export is reachable" {
     _ = try header.encode(&packet);
     const view = try parse_stun_message(&packet);
     _ = try runtime.on_response(started.component_id, view, 20);
+}
+
+test "pair builder exports are reachable" {
+    var stream = Stream.init(std.testing.allocator, 77);
+    defer stream.deinit();
+    try stream.add_component(1);
+
+    const local_addr: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 70 }, .port = 5100 } };
+    const remote_addr: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 70 }, .port = 6100 } };
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .host, local_addr),
+        .priority = candidate_compute_priority(.host, 10, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate_compute_priority(.srflx, 10, 1),
+        .address = remote_addr,
+    }));
+
+    const component_ids = [_]u16{1};
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 77, &component_ids, StunRetryPolicy{});
+    defer runtime.deinit();
+
+    const summary: PairBuildSummary = try populate_stream_checklists(&stream, &runtime, true, 9000);
+    try std.testing.expectEqual(@as(usize, 1), summary.generated);
+    try std.testing.expectEqual(@as(usize, 1), summary.added);
 }
 
 test "checklist exports are reachable" {

@@ -47,6 +47,13 @@ pub const ComponentConnectivityEngine = struct {
         try self.pair_contexts.put(pair.id, context);
     }
 
+    pub fn add_pair_unique(self: *ComponentConnectivityEngine, pair: checklist_mod.Pair, context: PairContext) !bool {
+        const added = try self.checklist.add_pair_unique(pair);
+        if (!added) return false;
+        try self.pair_contexts.put(pair.id, context);
+        return true;
+    }
+
     pub fn start_connecting(self: *ComponentConnectivityEngine) !void {
         if (self.component.state == .disconnected) {
             try self.component.start_connecting();

@@ -40,6 +40,20 @@ pub const Checklist = struct {
         try self.pairs.append(self.allocator, pair);
     }
 
+    pub fn has_pair(self: Checklist, component_id: u16, local_candidate_id: u64, remote_candidate_id: u64) bool {
+        for (self.pairs.items) |pair| {
+            if (pair.component_id != component_id) continue;
+            if (pair.local_candidate_id == local_candidate_id and pair.remote_candidate_id == remote_candidate_id) return true;
+        }
+        return false;
+    }
+
+    pub fn add_pair_unique(self: *Checklist, pair: Pair) !bool {
+        if (self.has_pair(pair.component_id, pair.local_candidate_id, pair.remote_candidate_id)) return false;
+        try self.add_pair(pair);
+        return true;
+    }
+
     pub fn pair_count(self: Checklist) usize {
         return self.pairs.items.len;
     }
@@ -262,4 +276,29 @@ test "checklist state counters and pending check detection" {
 
     try checklist.mark_failed(1);
     try std.testing.expect(!checklist.has_pending_or_in_progress());
+}
+
+test "checklist unique pair insertion by candidate ids" {
+    var checklist = Checklist.init(std.testing.allocator);
+    defer checklist.deinit();
+
+    try std.testing.expect(try checklist.add_pair_unique(.{
+        .id = 1,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 1,
+        .component_id = 1,
+        .state = .waiting,
+    }));
+
+    try std.testing.expect(!(try checklist.add_pair_unique(.{
+        .id = 2,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 2,
+        .component_id = 1,
+        .state = .waiting,
+    })));
+
+    try std.testing.expectEqual(@as(usize, 1), checklist.pair_count());
 }

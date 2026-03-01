@@ -2,12 +2,16 @@ const std = @import("std");
 const stream_mod = @import("stream.zig");
 const candidate = @import("candidate.zig");
 const discovery = @import("discovery.zig");
+const stream_connectivity = @import("stream_connectivity.zig");
+const pair_builder = @import("pair_builder.zig");
 
 pub const GatherSummary = struct {
     generated: usize,
     added: usize,
     next_candidate_id: u64,
 };
+
+pub const PairBuildSummary = pair_builder.PairBuildSummary;
 
 pub const Agent = struct {
     allocator: std.mem.Allocator,
@@ -132,6 +136,17 @@ pub const Agent = struct {
             .next_candidate_id = gathered.next_candidate_id,
         };
     }
+
+    pub fn populate_stream_checklists(
+        self: *Agent,
+        stream_id: u32,
+        runtime: *stream_connectivity.StreamConnectivityRuntime,
+        controlling: bool,
+        start_pair_id: u64,
+    ) !PairBuildSummary {
+        const target = self.get_stream(stream_id) orelse return error.NotFound;
+        return pair_builder.populate_stream_checklists(target, runtime, controlling, start_pair_id);
+    }
 };
 
 test "agent manages stream lifecycle" {
@@ -218,4 +233,34 @@ test "agent host candidate gathering and dedupe" {
 
     try std.testing.expectEqual(@as(usize, 2), try agent.local_candidate_count(stream_id, 1));
     try std.testing.expectEqual(@as(usize, 2), try agent.local_candidate_count(stream_id, 2));
+}
+
+test "agent populates runtime checklists from stream candidates" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const interfaces = [_]discovery.InterfaceAddress{
+        .{ .address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 41 }, .port = 5100 } } },
+    };
+    const component_ids = [_]u16{1};
+    _ = try agent.gather_host_candidates(stream_id, &interfaces, &component_ids, 100, true);
+
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 41 }, .port = 6100 } };
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 900,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 100, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, stream_id, &component_ids, .{});
+    defer runtime.deinit();
+
+    const summary = try agent.populate_stream_checklists(stream_id, &runtime, true, 2000);
+    try std.testing.expectEqual(@as(usize, 1), summary.generated);
+    try std.testing.expectEqual(@as(usize, 1), summary.added);
 }
