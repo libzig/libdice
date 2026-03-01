@@ -16,6 +16,9 @@ pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
 pub const stun_build_binding_request = @import("protocol/stun/usage_bind.zig").build_binding_request;
 pub const stun_is_binding_request = @import("protocol/stun/usage_bind.zig").is_binding_request;
 pub const stun_is_binding_response = @import("protocol/stun/usage_bind.zig").is_binding_response;
+pub const stun_ice_add_priority = @import("protocol/stun/usage_ice.zig").add_priority;
+pub const stun_ice_add_use_candidate = @import("protocol/stun/usage_ice.zig").add_use_candidate;
+pub const stun_ice_has_use_candidate = @import("protocol/stun/usage_ice.zig").has_use_candidate;
 pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
 pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
@@ -125,4 +128,17 @@ test "stun bind usage exports are reachable" {
     const view = try parse_stun_message(bytes);
     try std.testing.expect(stun_is_binding_request(view));
     try std.testing.expect(!stun_is_binding_response(view));
+}
+
+test "stun ice usage exports are reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [64]u8 = undefined;
+
+    var builder = try StunMessageBuilder.init(&packet, 0x0001, tx_id);
+    try stun_ice_add_priority(&builder, 10);
+    try stun_ice_add_use_candidate(&builder);
+
+    const bytes = try builder.finish();
+    const view = try parse_stun_message(bytes);
+    try std.testing.expect(try stun_ice_has_use_candidate(view));
 }
