@@ -1,0 +1,13 @@
+.{
+    .name = .libdice,
+    .version = "0.0.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "bin",
+        "examples",
+        "lib",
+    },
+    .fingerprint = 0x9d39be188f771703,
+}
