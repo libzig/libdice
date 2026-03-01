@@ -178,6 +178,26 @@ pub const IceUdpRuntimeBridge = struct {
         return self.dispatch.send(stream_id, component_id, remote, payload);
     }
 
+    pub fn send_via_pair(
+        self: *IceUdpRuntimeBridge,
+        stream_id: u32,
+        component_id: u16,
+        local_candidate_id: u64,
+        remote: candidate.Address,
+        payload: []const u8,
+        now_ms: u64,
+        relay_packet_buf: []u8,
+        relay_transaction_id: [12]u8,
+    ) !usize {
+        const local_candidate = try self.runtime.agent.find_local_candidate_by_id(stream_id, local_candidate_id);
+        if (local_candidate.candidate_type == .relay) {
+            const binding = self.find_turn_binding(stream_id, component_id) orelse return error.NotFound;
+            return binding.socket.send_to_peer(relay_packet_buf, relay_transaction_id, remote, payload, now_ms);
+        }
+
+        return self.dispatch.send(stream_id, component_id, remote, payload);
+    }
+
     fn find_turn_binding(self: *IceUdpRuntimeBridge, stream_id: u32, component_id: u16) ?*TurnBinding {
         for (self.turn_bindings.items) |*binding| {
             if (binding.stream_id == stream_id and binding.component_id == component_id) return binding;
@@ -1842,4 +1862,81 @@ test "udp bridge completes relay connectivity check from TURN data indication" {
 
     try std.testing.expectEqual(@as(usize, 1), summary.completed_checks);
     try std.testing.expectEqual(@as(u64, 13_000), completed[0].meta.candidate_pair_id);
+}
+
+test "udp bridge send_via_pair sends direct payload for non-relay local candidate" {
+    var peer = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer peer.deinit();
+    const peer_addr = try peer.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 211 }, .port = 5100 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 501,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+
+    var relay_buf: [128]u8 = undefined;
+    const tx = [_]u8{ 1, 3, 3, 7, 0, 1, 0, 1, 4, 2, 0, 0 };
+    _ = try bridge.send_via_pair(stream_id, 1, 501, peer_addr, "payload-direct", 0, &relay_buf, tx);
+
+    var recv: [128]u8 = undefined;
+    const got = try peer.recv_from(&recv);
+    try std.testing.expectEqualStrings("payload-direct", recv[0..got.bytes]);
+}
+
+test "udp bridge send_via_pair sends relayed payload for relay local candidate" {
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    const relay_local: candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 4 }, .port = 62000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 46 }, .port = 5002 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 502,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, relay_local),
+        .priority = candidate.compute_candidate_priority(.relay, 50, 1),
+        .address = relay_local,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    var relay_buf: [256]u8 = undefined;
+    const tx = [_]u8{ 9, 9, 0, 0, 4, 4, 1, 1, 2, 2, 3, 3 };
+    _ = try bridge.send_via_pair(stream_id, 1, 502, remote_addr, "relay-data", 10, &relay_buf, tx);
+
+    var recv: [256]u8 = undefined;
+    const got = try turn_server.recv_from(&recv);
+    const view = try parser.parse_message(recv[0..got.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.send_indication_type), view.header.message_type);
+    try std.testing.expectEqualStrings("relay-data", (try usage_turn.read_data_attr(view)).?);
 }
