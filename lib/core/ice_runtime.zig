@@ -66,6 +66,10 @@ pub const RemoteBatchExpandSummary = struct {
     next_pair_id: u64,
 };
 
+pub const ChecklistPopulateOptions = struct {
+    policy: pair_builder.PairBuildPolicy = .all,
+};
+
 pub const DueRetransmit = struct {
     stream_id: u32,
     component_id: u16,
@@ -169,9 +173,19 @@ pub const IceRuntime = struct {
     }
 
     pub fn populate_stream_checklists(self: *IceRuntime, stream_id: u32, controlling: bool, start_pair_id: u64) !pair_builder.PairBuildSummary {
+        return self.populate_stream_checklists_with_options(stream_id, controlling, start_pair_id, .{});
+    }
+
+    pub fn populate_stream_checklists_with_options(
+        self: *IceRuntime,
+        stream_id: u32,
+        controlling: bool,
+        start_pair_id: u64,
+        options: ChecklistPopulateOptions,
+    ) !pair_builder.PairBuildSummary {
         const entry = self.find_entry(stream_id) orelse return error.NotFound;
         const stream = self.agent.get_stream(stream_id) orelse return error.NotFound;
-        return pair_builder.populate_stream_checklists(stream, &entry.runtime, controlling, start_pair_id);
+        return pair_builder.populate_stream_checklists_with_policy(stream, &entry.runtime, controlling, start_pair_id, options.policy);
     }
 
     pub fn restart_stream(self: *IceRuntime, stream_id: u32, controlling: bool, start_pair_id: u64) !RestartSummary {
@@ -851,4 +865,50 @@ test "ice runtime collects due retransmits across streams" {
     try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expectEqual(stream_id, due[0].stream_id);
     try std.testing.expectEqual(@as(u64, 9100), due[0].pair_id);
+}
+
+test "ice runtime can populate checklist with force-relay policy" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const host_local: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 160 }, .port = 5000 } };
+    const relay_local: candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 160 }, .port = 5100 } };
+    const srflx_remote: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 160 }, .port = 6000 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, host_local),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = host_local,
+    }));
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, relay_local),
+        .priority = candidate.compute_candidate_priority(.relay, 10, 1),
+        .address = relay_local,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, srflx_remote),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = srflx_remote,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    const summary = try runtime.populate_stream_checklists_with_options(stream_id, true, 12_000, .{ .policy = .force_relay });
+    try std.testing.expectEqual(@as(usize, 1), summary.generated);
+    try std.testing.expectEqual(@as(usize, 1), summary.added);
 }

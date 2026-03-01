@@ -10,11 +10,26 @@ pub const PairBuildSummary = struct {
     next_pair_id: u64,
 };
 
+pub const PairBuildPolicy = enum {
+    all,
+    force_relay,
+};
+
 pub fn populate_stream_checklists(
     stream: *stream_mod.Stream,
     runtime: *stream_connectivity.StreamConnectivityRuntime,
     controlling: bool,
     start_pair_id: u64,
+) !PairBuildSummary {
+    return populate_stream_checklists_with_policy(stream, runtime, controlling, start_pair_id, .all);
+}
+
+pub fn populate_stream_checklists_with_policy(
+    stream: *stream_mod.Stream,
+    runtime: *stream_connectivity.StreamConnectivityRuntime,
+    controlling: bool,
+    start_pair_id: u64,
+    policy: PairBuildPolicy,
 ) !PairBuildSummary {
     var pair_id = start_pair_id;
     var generated: usize = 0;
@@ -29,6 +44,7 @@ pub fn populate_stream_checklists(
             for (stream.remote_candidates.items.items) |remote| {
                 if (remote.component_id != component.id) continue;
                 if (local.transport != remote.transport) continue;
+                if (policy == .force_relay and local.candidate_type != .relay and remote.candidate_type != .relay) continue;
 
                 generated += 1;
 
@@ -183,4 +199,61 @@ test "pair builder is idempotent with same candidate sets" {
     try std.testing.expectEqual(@as(usize, 1), second.generated);
     try std.testing.expectEqual(@as(usize, 0), second.added);
     try std.testing.expectEqual(@as(usize, 1), runtime.get_engine(1).?.checklist.pair_count());
+}
+
+test "pair builder force_relay policy filters non-relay pairs" {
+    var stream = stream_mod.Stream.init(std.testing.allocator, 3);
+    defer stream.deinit();
+    try stream.add_component(1);
+
+    const component_ids = [_]u16{1};
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 3, &component_ids, .{}, .{}, .regular);
+    defer runtime.deinit();
+
+    const host_local: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 30 }, .port = 5000 } };
+    const relay_local: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 30 }, .port = 5300 } };
+    const srflx_remote: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 30 }, .port = 6000 } };
+    const relay_remote: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 30 }, .port = 6100 } };
+
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = stream_mod.candidate.compute_foundation(.udp, .host, host_local),
+        .priority = stream_mod.candidate.compute_candidate_priority(.host, 100, 1),
+        .address = host_local,
+    }));
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = stream_mod.candidate.compute_foundation(.udp, .relay, relay_local),
+        .priority = stream_mod.candidate.compute_candidate_priority(.relay, 10, 1),
+        .address = relay_local,
+    }));
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = stream_mod.candidate.compute_foundation(.udp, .srflx, srflx_remote),
+        .priority = stream_mod.candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = srflx_remote,
+    }));
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 11,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = stream_mod.candidate.compute_foundation(.udp, .relay, relay_remote),
+        .priority = stream_mod.candidate.compute_candidate_priority(.relay, 11, 1),
+        .address = relay_remote,
+    }));
+
+    const summary = try populate_stream_checklists_with_policy(&stream, &runtime, true, 100, .force_relay);
+    try std.testing.expectEqual(@as(usize, 3), summary.generated);
+    try std.testing.expectEqual(@as(usize, 3), summary.added);
+    try std.testing.expectEqual(@as(usize, 3), runtime.get_engine(1).?.checklist.pair_count());
 }
