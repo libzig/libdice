@@ -141,6 +141,9 @@ pub const TurnUdpReceivedPacket = @import("net/turn_socket_udp.zig").ReceivedPac
 pub const TurnUdpPermission = @import("net/turn_socket_udp.zig").Permission;
 pub const TurnUdpChannelBinding = @import("net/turn_socket_udp.zig").ChannelBinding;
 pub const TurnUdpAllocationLease = @import("net/turn_socket_udp.zig").AllocationLease;
+pub const TurnTcpFramer = @import("net/turn_socket_tcp.zig").TurnTcpFramer;
+pub const TurnTcpPacket = @import("net/turn_socket_tcp.zig").TurnTcpPacket;
+pub const turn_tcp_encode_framed_payload = @import("net/turn_socket_tcp.zig").encode_framed_payload;
 pub const IceUdpRuntimeBridge = @import("net/ice_udp_runtime.zig").IceUdpRuntimeBridge;
 pub const IceUdpPollSummary = @import("net/ice_udp_runtime.zig").PollSummary;
 pub const IceUdpAdvanceSummary = @import("net/ice_udp_runtime.zig").AdvanceSummary;
@@ -652,4 +655,23 @@ test "turn channel data exports are reachable" {
     const decoded: TurnChannelDataFrameView = try turn_channel_decode_frame(frame, true);
     try std.testing.expectEqual(@as(u16, 0x4001), decoded.channel_number);
     try std.testing.expectEqualStrings("abc", decoded.payload);
+}
+
+test "turn tcp framing exports are reachable" {
+    var framed: [64]u8 = undefined;
+    var payload: [20]u8 = undefined;
+    const tx = [_]u8{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    _ = try StunHeader.init(0x0101, 0, tx).encode(&payload);
+
+    const frame = try turn_tcp_encode_framed_payload(&framed, &payload);
+    var framer = TurnTcpFramer.init(std.testing.allocator);
+    defer framer.deinit();
+    try framer.push(frame);
+
+    var out: [64]u8 = undefined;
+    const packet = (try framer.pop_packet(&out)).?;
+    switch (packet) {
+        .stun => |view| try std.testing.expectEqual(@as(u16, 0x0101), view.header.message_type),
+        else => return error.UnexpectedPacketType,
+    }
 }
