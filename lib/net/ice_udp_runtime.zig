@@ -65,6 +65,7 @@ pub const TurnMaintenanceOptions = struct {
     username: ?[]const u8 = null,
     realm: ?[]const u8 = null,
     nonce: ?[]const u8 = null,
+    prefer_server_auth_challenge: bool = true,
     integrity_key: ?[]const u8 = null,
     include_fingerprint: bool = false,
 };
@@ -817,52 +818,77 @@ pub const IceUdpRuntimeBridge = struct {
         };
 
         for (self.turn_bindings.items) |*binding| {
+            const auth_retry = binding.socket.has_auth_retry_required();
+            const realm = if (options.prefer_server_auth_challenge)
+                (binding.socket.auth_realm_value() orelse options.realm)
+            else
+                options.realm;
+            const nonce = if (options.prefer_server_auth_challenge)
+                (binding.socket.auth_nonce_value() orelse options.nonce)
+            else
+                options.nonce;
+            var sent_for_binding: usize = 0;
+
             if (binding.socket.allocation == null and options.allocate_if_missing) {
                 const tx_id = stun_tx_from_rng(random);
-                _ = try binding.socket.send_allocate_request(packet_buf, tx_id, options.allocate_options);
+                var allocate_options = options.allocate_options;
+                if (options.username != null) allocate_options.username = options.username;
+                if (realm != null) allocate_options.realm = realm;
+                if (nonce != null) allocate_options.nonce = nonce;
+                _ = try binding.socket.send_allocate_request(packet_buf, tx_id, allocate_options);
                 summary.allocations_requested += 1;
+                sent_for_binding += 1;
             }
 
             if (binding.socket.allocation) |lease| {
-                if (now_ms >= lease.refresh_due_at_ms(options.allocation_refresh_margin_ms)) {
+                if (auth_retry or now_ms >= lease.refresh_due_at_ms(options.allocation_refresh_margin_ms)) {
                     const tx_id = stun_tx_from_rng(random);
-                    _ = try binding.socket.send_refresh_request(packet_buf, tx_id, options.refresh_lifetime_seconds, options.nonce, options.realm, options.username);
+                    _ = try binding.socket.send_refresh_request(packet_buf, tx_id, options.refresh_lifetime_seconds, nonce, realm, options.username);
                     summary.allocation_refreshes_sent += 1;
+                    sent_for_binding += 1;
                 }
             }
 
             var due_permissions: [16]candidate.Address = undefined;
-            const due_permission_count = binding.socket.collect_due_permission_refreshes(now_ms, options.permission_refresh_margin_ms, &due_permissions);
+            const permission_margin = if (auth_retry) std.math.maxInt(u64) else options.permission_refresh_margin_ms;
+            const due_permission_count = binding.socket.collect_due_permission_refreshes(now_ms, permission_margin, &due_permissions);
             for (due_permissions[0..@min(due_permissions.len, due_permission_count)]) |peer| {
                 const tx_id = stun_tx_from_rng(random);
                 const peers = [_]address_attrs.StunAddress{candidate_to_stun_address(peer)};
                 _ = try binding.socket.send_create_permission_request(packet_buf, tx_id, .{
                     .peer_addresses = &peers,
                     .username = options.username,
-                    .realm = options.realm,
-                    .nonce = options.nonce,
+                    .realm = realm,
+                    .nonce = nonce,
                     .integrity_key = options.integrity_key,
                     .include_fingerprint = options.include_fingerprint,
                 });
                 try binding.socket.note_permission_refresh_request(tx_id, peer, turn_socket_udp.TurnUdpSocket.permission_default_lifetime_seconds);
                 summary.permission_refreshes_sent += 1;
+                sent_for_binding += 1;
             }
 
             var due_channels: [16]turn_socket_udp.ChannelBinding = undefined;
-            const due_channel_count = binding.socket.collect_due_channel_refreshes(now_ms, options.channel_refresh_margin_ms, &due_channels);
+            const channel_margin = if (auth_retry) std.math.maxInt(u64) else options.channel_refresh_margin_ms;
+            const due_channel_count = binding.socket.collect_due_channel_refreshes(now_ms, channel_margin, &due_channels);
             for (due_channels[0..@min(due_channels.len, due_channel_count)]) |entry| {
                 const tx_id = stun_tx_from_rng(random);
                 _ = try binding.socket.send_channel_bind_request(packet_buf, tx_id, .{
                     .channel_number = entry.channel_number,
                     .peer_address = candidate_to_stun_address(entry.peer),
                     .username = options.username,
-                    .realm = options.realm,
-                    .nonce = options.nonce,
+                    .realm = realm,
+                    .nonce = nonce,
                     .integrity_key = options.integrity_key,
                     .include_fingerprint = options.include_fingerprint,
                 });
                 try binding.socket.note_channel_refresh_request(tx_id, entry.channel_number, entry.peer, turn_socket_udp.TurnUdpSocket.channel_default_lifetime_seconds);
                 summary.channel_refreshes_sent += 1;
+                sent_for_binding += 1;
+            }
+
+            if (auth_retry and sent_for_binding > 0) {
+                binding.socket.clear_auth_retry_required();
             }
 
             summary.permissions_pruned += binding.socket.prune_expired_permissions(now_ms);
@@ -2343,4 +2369,69 @@ test "udp bridge applies TURN permission and channel success responses" {
     try std.testing.expect(binding.socket.permissions.items[0].expires_at_ms > 10_000);
     try std.testing.expectEqual(@as(usize, 1), binding.socket.channel_binding_count());
     try std.testing.expect(binding.socket.channels.items[0].expires_at_ms > 10_000);
+}
+
+test "udp bridge retries TURN maintenance with server auth challenge" {
+    const encoder = @import("../protocol/stun/encoder.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    binding.socket.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 120,
+        .expires_at_ms = 10_000,
+    };
+
+    var prng = std.Random.DefaultPrng.init(52);
+    var packet_buf: [512]u8 = undefined;
+    _ = try bridge.run_turn_maintenance(prng.random(), 9_500, &packet_buf, .{
+        .allocation_refresh_margin_ms = 1_000,
+        .username = "u",
+    });
+
+    var recv: [512]u8 = undefined;
+    const first_req = try turn_server.recv_from(&recv);
+    const first_view = try parser.parse_message(recv[0..first_req.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.refresh_request_type), first_view.header.message_type);
+
+    var stale_buf: [256]u8 = undefined;
+    var stale = try encoder.Builder.init(&stale_buf, usage_turn.refresh_error_response_type, first_view.header.transaction_id);
+    const err_438 = [_]u8{ 0x00, 0x00, 0x04, 0x26 };
+    try stale.add_attr(usage_turn.error_code_attr_type, &err_438);
+    try stale.add_attr(usage_turn.realm_attr_type, "example.org");
+    try stale.add_attr(usage_turn.nonce_attr_type, "new-nonce");
+    const stale_packet = try stale.finish();
+    _ = try turn_server.send_to(first_req.from, stale_packet);
+
+    var recv_buf: [256]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    _ = try bridge.poll_until_idle(9_600, &recv_buf, &completed);
+    try std.testing.expect(binding.socket.has_auth_retry_required());
+
+    _ = try bridge.run_turn_maintenance(prng.random(), 9_700, &packet_buf, .{
+        .allocation_refresh_margin_ms = 1_000,
+        .username = "u",
+    });
+    const retry_req = try turn_server.recv_from(&recv);
+    const retry_view = try parser.parse_message(recv[0..retry_req.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.refresh_request_type), retry_view.header.message_type);
+    try std.testing.expectEqualStrings("example.org", (try usage_turn.read_realm(retry_view)).?);
+    try std.testing.expectEqualStrings("new-nonce", (try usage_turn.read_nonce(retry_view)).?);
+    try std.testing.expect(!binding.socket.has_auth_retry_required());
 }

@@ -79,6 +79,9 @@ pub const TurnUdpSocket = struct {
     permissions: std.ArrayList(Permission),
     channels: std.ArrayList(ChannelBinding),
     pending_refreshes: std.ArrayList(PendingRefresh),
+    auth_realm: std.ArrayList(u8),
+    auth_nonce: std.ArrayList(u8),
+    auth_retry_required: bool,
 
     pub fn init_nonblocking(allocator: std.mem.Allocator, local_bind: candidate.Address, server: candidate.Address) !TurnUdpSocket {
         return .{
@@ -89,10 +92,15 @@ pub const TurnUdpSocket = struct {
             .permissions = .empty,
             .channels = .empty,
             .pending_refreshes = .empty,
+            .auth_realm = .empty,
+            .auth_nonce = .empty,
+            .auth_retry_required = false,
         };
     }
 
     pub fn deinit(self: *TurnUdpSocket) void {
+        self.auth_realm.deinit(self.allocator);
+        self.auth_nonce.deinit(self.allocator);
         self.pending_refreshes.deinit(self.allocator);
         self.permissions.deinit(self.allocator);
         self.channels.deinit(self.allocator);
@@ -153,7 +161,53 @@ pub const TurnUdpSocket = struct {
             const handled = try self.on_channel_bind_refresh_success(view.header.transaction_id, now_ms);
             return handled;
         }
+        if (view.header.message_type == usage_turn.allocate_error_response_type or
+            view.header.message_type == usage_turn.refresh_error_response_type or
+            view.header.message_type == usage_turn.create_permission_error_response_type or
+            view.header.message_type == usage_turn.channel_bind_error_response_type)
+        {
+            return try self.on_server_error(view);
+        }
         return false;
+    }
+
+    pub fn has_auth_retry_required(self: *const TurnUdpSocket) bool {
+        return self.auth_retry_required;
+    }
+
+    pub fn clear_auth_retry_required(self: *TurnUdpSocket) void {
+        self.auth_retry_required = false;
+    }
+
+    pub fn auth_realm_value(self: *const TurnUdpSocket) ?[]const u8 {
+        if (self.auth_realm.items.len == 0) return null;
+        return self.auth_realm.items;
+    }
+
+    pub fn auth_nonce_value(self: *const TurnUdpSocket) ?[]const u8 {
+        if (self.auth_nonce.items.len == 0) return null;
+        return self.auth_nonce.items;
+    }
+
+    fn on_server_error(self: *TurnUdpSocket, view: parser.MessageView) !bool {
+        const code = (try usage_turn.read_error_code(view)) orelse return false;
+        _ = self.take_pending_refresh(view.header.transaction_id);
+
+        if (code == 401 or code == 438) {
+            const realm = (try usage_turn.read_realm(view)) orelse return false;
+            const nonce = (try usage_turn.read_nonce(view)) orelse return false;
+            try self.set_auth_challenge(realm, nonce);
+            self.auth_retry_required = true;
+        }
+
+        return true;
+    }
+
+    fn set_auth_challenge(self: *TurnUdpSocket, realm: []const u8, nonce: []const u8) !void {
+        self.auth_realm.clearRetainingCapacity();
+        self.auth_nonce.clearRetainingCapacity();
+        try self.auth_realm.appendSlice(self.allocator, realm);
+        try self.auth_nonce.appendSlice(self.allocator, nonce);
     }
 
     pub fn note_permission_refresh_request(
@@ -510,6 +564,30 @@ test "turn udp socket applies permission and channel success responses" {
     try std.testing.expect(try turn.on_server_stun(channel_view, 8_000, null));
     try std.testing.expectEqual(@as(usize, 1), turn.channel_binding_count());
     try std.testing.expectEqual(@as(u64, 608_000), turn.channels.items[0].expires_at_ms);
+}
+
+test "turn udp socket captures auth challenge from stale nonce error" {
+    var turn = try TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+    defer turn.deinit();
+
+    const tx_id = [_]u8{ 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6 };
+    var packet: [192]u8 = undefined;
+    var builder = try @import("../protocol/stun/encoder.zig").Builder.init(&packet, usage_turn.refresh_error_response_type, tx_id);
+    const err_438 = [_]u8{ 0x00, 0x00, 0x04, 0x26 };
+    try builder.add_attr(usage_turn.error_code_attr_type, &err_438);
+    try builder.add_attr(usage_turn.realm_attr_type, "example.org");
+    try builder.add_attr(usage_turn.nonce_attr_type, "new-nonce");
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+
+    try std.testing.expect(try turn.on_server_stun(view, 0, null));
+    try std.testing.expect(turn.has_auth_retry_required());
+    try std.testing.expectEqualStrings("example.org", turn.auth_realm_value().?);
+    try std.testing.expectEqualStrings("new-nonce", turn.auth_nonce_value().?);
 }
 
 test "turn udp socket sends and decodes channel data" {

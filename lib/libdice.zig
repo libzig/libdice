@@ -99,6 +99,8 @@ pub const stun_turn_data_indication_type = @import("protocol/stun/usage_turn.zig
 pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
 pub const stun_turn_is_allocate_error_response = @import("protocol/stun/usage_turn.zig").is_allocate_error_response;
 pub const stun_turn_read_lifetime_seconds = @import("protocol/stun/usage_turn.zig").read_lifetime_seconds;
+pub const stun_turn_read_realm = @import("protocol/stun/usage_turn.zig").read_realm;
+pub const stun_turn_read_nonce = @import("protocol/stun/usage_turn.zig").read_nonce;
 pub const stun_turn_read_requested_transport = @import("protocol/stun/usage_turn.zig").read_requested_transport;
 pub const stun_turn_read_error_code = @import("protocol/stun/usage_turn.zig").read_error_code;
 pub const stun_turn_parse_allocate_success_response = @import("protocol/stun/usage_turn.zig").parse_allocate_success_response;
@@ -585,6 +587,8 @@ test "stun turn usage exports are reachable" {
     const view = try parse_stun_message(bytes);
     const lifetime = try stun_turn_read_lifetime_seconds(view);
     try std.testing.expectEqual(@as(u32, 300), lifetime.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try stun_turn_read_realm(view));
+    try std.testing.expectEqual(@as(?[]const u8, null), try stun_turn_read_nonce(view));
 
     const transport = try stun_turn_read_requested_transport(view);
     try std.testing.expect(transport != null);

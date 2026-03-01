@@ -281,6 +281,22 @@ pub fn read_lifetime_seconds(view: parser.MessageView) TurnError!?u32 {
     return null;
 }
 
+pub fn read_realm(view: parser.MessageView) parser.ParserError!?[]const u8 {
+    var it = view.attr_iterator();
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == realm_attr_type) return attr.value;
+    }
+    return null;
+}
+
+pub fn read_nonce(view: parser.MessageView) parser.ParserError!?[]const u8 {
+    var it = view.attr_iterator();
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == nonce_attr_type) return attr.value;
+    }
+    return null;
+}
+
 pub fn read_requested_transport(view: parser.MessageView) TurnError!?u8 {
     var it = view.attr_iterator();
     while (try it.next()) |attr| {
@@ -413,6 +429,22 @@ test "read error code from TURN error response" {
     const view = try parser.parse_message(&packet);
     try std.testing.expect(is_allocate_error_response(view));
     try std.testing.expectEqual(@as(u16, 401), (try read_error_code(view)).?);
+}
+
+test "read nonce and realm from TURN error response" {
+    const tx_id = [_]u8{ 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 };
+    var packet: [128]u8 = undefined;
+
+    var builder = try encoder.Builder.init(&packet, allocate_error_response_type, tx_id);
+    const err_value = [_]u8{ 0x00, 0x00, 0x04, 0x26 }; // 426 just as payload structure check
+    try builder.add_attr(error_code_attr_type, &err_value);
+    try builder.add_attr(realm_attr_type, "example.org");
+    try builder.add_attr(nonce_attr_type, "nonce-token");
+    const bytes = try builder.finish();
+
+    const view = try parser.parse_message(bytes);
+    try std.testing.expectEqualStrings("example.org", (try read_realm(view)).?);
+    try std.testing.expectEqualStrings("nonce-token", (try read_nonce(view)).?);
 }
 
 test "readers validate malformed TURN attribute lengths" {
