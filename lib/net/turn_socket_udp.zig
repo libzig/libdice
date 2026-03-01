@@ -9,12 +9,22 @@ const channel_data = @import("../protocol/turn/channel_data.zig");
 pub const Permission = struct {
     peer: candidate.Address,
     expires_at_ms: u64,
+
+    pub fn refresh_due_at_ms(self: Permission, refresh_margin_ms: u64) u64 {
+        if (refresh_margin_ms >= self.expires_at_ms) return 0;
+        return self.expires_at_ms - refresh_margin_ms;
+    }
 };
 
 pub const ChannelBinding = struct {
     channel_number: u16,
     peer: candidate.Address,
     expires_at_ms: u64,
+
+    pub fn refresh_due_at_ms(self: ChannelBinding, refresh_margin_ms: u64) u64 {
+        if (refresh_margin_ms >= self.expires_at_ms) return 0;
+        return self.expires_at_ms - refresh_margin_ms;
+    }
 };
 
 pub const AllocationLease = struct {
@@ -200,8 +210,56 @@ pub const TurnUdpSocket = struct {
         return self.permissions.items.len;
     }
 
+    pub fn collect_due_permission_refreshes(self: *TurnUdpSocket, now_ms: u64, refresh_margin_ms: u64, out: []candidate.Address) usize {
+        var due: usize = 0;
+        for (self.permissions.items) |entry| {
+            if (now_ms < entry.refresh_due_at_ms(refresh_margin_ms)) continue;
+            if (due < out.len) out[due] = entry.peer;
+            due += 1;
+        }
+        return due;
+    }
+
+    pub fn prune_expired_permissions(self: *TurnUdpSocket, now_ms: u64) usize {
+        var removed: usize = 0;
+        var i: usize = 0;
+        while (i < self.permissions.items.len) {
+            if (self.permissions.items[i].expires_at_ms > now_ms) {
+                i += 1;
+                continue;
+            }
+            _ = self.permissions.orderedRemove(i);
+            removed += 1;
+        }
+        return removed;
+    }
+
     pub fn channel_binding_count(self: TurnUdpSocket) usize {
         return self.channels.items.len;
+    }
+
+    pub fn collect_due_channel_refreshes(self: *TurnUdpSocket, now_ms: u64, refresh_margin_ms: u64, out: []ChannelBinding) usize {
+        var due: usize = 0;
+        for (self.channels.items) |entry| {
+            if (now_ms < entry.refresh_due_at_ms(refresh_margin_ms)) continue;
+            if (due < out.len) out[due] = entry;
+            due += 1;
+        }
+        return due;
+    }
+
+    pub fn prune_expired_channel_bindings(self: *TurnUdpSocket, now_ms: u64) usize {
+        var removed: usize = 0;
+        var i: usize = 0;
+        while (i < self.channels.items.len) {
+            if (self.channels.items[i].expires_at_ms > now_ms) {
+                i += 1;
+                continue;
+            }
+            _ = self.channels.orderedRemove(i);
+            removed += 1;
+        }
+        return removed;
     }
 
     fn find_channel_by_number(self: *const TurnUdpSocket, channel_number: u16) ?ChannelBinding {
@@ -423,4 +481,19 @@ test "turn udp socket tracks permissions and channel bindings" {
     try turn.set_channel_binding(0x4001, peer_a, 1000, 600);
     try turn.set_channel_binding(0x4001, peer_b, 2000, 600);
     try std.testing.expectEqual(@as(usize, 1), turn.channel_binding_count());
+
+    var due_permissions: [2]candidate.Address = undefined;
+    const p_due = turn.collect_due_permission_refreshes(250_000, 50_000, &due_permissions);
+    try std.testing.expectEqual(@as(usize, 1), p_due);
+    try std.testing.expectEqualDeep(peer_a, due_permissions[0]);
+
+    var due_channels: [2]ChannelBinding = undefined;
+    const c_due = turn.collect_due_channel_refreshes(590_000, 20_000, &due_channels);
+    try std.testing.expectEqual(@as(usize, 1), c_due);
+    try std.testing.expectEqual(@as(u16, 0x4001), due_channels[0].channel_number);
+
+    try std.testing.expectEqual(@as(usize, 1), turn.prune_expired_permissions(400_001));
+    try std.testing.expectEqual(@as(usize, 0), turn.permission_count());
+    try std.testing.expectEqual(@as(usize, 1), turn.prune_expired_channel_bindings(900_001));
+    try std.testing.expectEqual(@as(usize, 0), turn.channel_binding_count());
 }
