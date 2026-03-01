@@ -15,9 +15,11 @@ pub const ConsentConfig = @import("core/consent.zig").ConsentConfig;
 pub const ConsentState = @import("core/consent.zig").ConsentState;
 pub const ConsentTracker = @import("core/consent.zig").ConsentTracker;
 pub const NominationMode = @import("core/nomination.zig").NominationMode;
+pub const ConnectivityEngineStats = @import("core/connectivity_engine.zig").ConnectivityEngineStats;
 pub const StreamConnectivityRuntime = @import("core/stream_connectivity.zig").StreamConnectivityRuntime;
 pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCheck;
 pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
+pub const StreamConnectivityStats = @import("core/stream_connectivity.zig").StreamConnectivityStats;
 pub const PairBuildSummary = @import("core/pair_builder.zig").PairBuildSummary;
 pub const populate_stream_checklists = @import("core/pair_builder.zig").populate_stream_checklists;
 pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
@@ -25,6 +27,7 @@ pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
 pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
 pub const IceRuntimeRestartSummary = @import("core/ice_runtime.zig").RestartSummary;
 pub const IceRuntimeConsentTickSummary = @import("core/ice_runtime.zig").ConsentTickSummary;
+pub const IceRuntimeStats = @import("core/ice_runtime.zig").IceRuntimeStats;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -183,6 +186,9 @@ test "component connectivity engine export is reachable" {
     const view = try parse_stun_message(&packet);
     const completed = try engine.on_response(view, 10);
     try std.testing.expectEqual(@as(u64, 1), completed.meta.candidate_pair_id);
+
+    const cstats: ConnectivityEngineStats = engine.stats();
+    try std.testing.expectEqual(@as(usize, 1), cstats.succeeded_pairs);
 }
 
 test "stream connectivity runtime export is reachable" {
@@ -208,6 +214,9 @@ test "stream connectivity runtime export is reachable" {
     _ = try header.encode(&packet);
     const view = try parse_stun_message(&packet);
     _ = try runtime.on_response(started.component_id, view, 20);
+
+    const sstats: StreamConnectivityStats = runtime.stats();
+    try std.testing.expectEqual(@as(usize, 2), sstats.component_count);
 }
 
 test "pair builder exports are reachable" {
@@ -291,6 +300,9 @@ test "ice runtime exports are reachable" {
 
     const consent_tick: IceRuntimeConsentTickSummary = runtime.tick_consent_all(12000);
     try std.testing.expectEqual(@as(usize, 0), consent_tick.failed_components);
+
+    const istats: IceRuntimeStats = runtime.stats();
+    try std.testing.expectEqual(@as(usize, 1), istats.stream_count);
 }
 
 test "checklist exports are reachable" {

@@ -18,6 +18,18 @@ pub const TimedOutWithComponent = struct {
     timed_out: conncheck.TimedOutCheck,
 };
 
+pub const StreamConnectivityStats = struct {
+    stream_id: u32,
+    component_count: usize,
+    pending_transactions: usize,
+    waiting_pairs: usize,
+    in_progress_pairs: usize,
+    succeeded_pairs: usize,
+    failed_pairs: usize,
+    ready_components: usize,
+    failed_components: usize,
+};
+
 pub const StreamConnectivityRuntime = struct {
     allocator: std.mem.Allocator,
     stream_id: u32,
@@ -113,6 +125,39 @@ pub const StreamConnectivityRuntime = struct {
             if (engine.tick_consent(now_ms)) failed_components += 1;
         }
         return failed_components;
+    }
+
+    pub fn stats(self: *StreamConnectivityRuntime) StreamConnectivityStats {
+        var pending_transactions: usize = 0;
+        var waiting_pairs: usize = 0;
+        var in_progress_pairs: usize = 0;
+        var succeeded_pairs: usize = 0;
+        var failed_pairs: usize = 0;
+        var ready_components: usize = 0;
+        var failed_components: usize = 0;
+
+        for (self.engines.items) |*engine| {
+            const s = engine.stats();
+            pending_transactions += s.pending_transactions;
+            waiting_pairs += s.waiting_pairs;
+            in_progress_pairs += s.in_progress_pairs;
+            succeeded_pairs += s.succeeded_pairs;
+            failed_pairs += s.failed_pairs;
+            if (s.component_state == .ready) ready_components += 1;
+            if (s.component_state == .failed) failed_components += 1;
+        }
+
+        return .{
+            .stream_id = self.stream_id,
+            .component_count = self.component_count(),
+            .pending_transactions = pending_transactions,
+            .waiting_pairs = waiting_pairs,
+            .in_progress_pairs = in_progress_pairs,
+            .succeeded_pairs = succeeded_pairs,
+            .failed_pairs = failed_pairs,
+            .ready_components = ready_components,
+            .failed_components = failed_components,
+        };
     }
 
     pub fn start_next_check_for_component(
@@ -342,4 +387,29 @@ test "stream connectivity runtime consent probing and failure tick" {
     const failed = runtime.tick_consent_all(17);
     try std.testing.expectEqual(@as(usize, 1), failed);
     try std.testing.expectEqual(component.ComponentState.failed, try runtime.component_state(1));
+}
+
+test "stream connectivity runtime stats snapshot" {
+    const component_ids = [_]u16{ 1, 2 };
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 60, &component_ids, .{}, .{}, .regular);
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 801,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(20);
+    _ = try runtime.start_next_check_for_component(1, prng.random(), 0);
+
+    const snapshot = runtime.stats();
+    try std.testing.expectEqual(@as(u32, 60), snapshot.stream_id);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.component_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
 }

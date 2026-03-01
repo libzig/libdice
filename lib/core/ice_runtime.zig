@@ -21,6 +21,18 @@ pub const TimedOutCheck = struct {
     timed_out: conncheck.TimedOutCheck,
 };
 
+pub const IceRuntimeStats = struct {
+    stream_count: usize,
+    component_count: usize,
+    pending_transactions: usize,
+    waiting_pairs: usize,
+    in_progress_pairs: usize,
+    succeeded_pairs: usize,
+    failed_pairs: usize,
+    ready_components: usize,
+    failed_components: usize,
+};
+
 pub const ConsentTickSummary = struct {
     failed_components: usize,
 };
@@ -212,6 +224,41 @@ pub const IceRuntime = struct {
         }
 
         return .{ .failed_components = failed_components };
+    }
+
+    pub fn stats(self: *IceRuntime) IceRuntimeStats {
+        var component_count: usize = 0;
+        var pending_transactions: usize = 0;
+        var waiting_pairs: usize = 0;
+        var in_progress_pairs: usize = 0;
+        var succeeded_pairs: usize = 0;
+        var failed_pairs: usize = 0;
+        var ready_components: usize = 0;
+        var failed_components: usize = 0;
+
+        for (self.entries.items) |*entry| {
+            const s = entry.runtime.stats();
+            component_count += s.component_count;
+            pending_transactions += s.pending_transactions;
+            waiting_pairs += s.waiting_pairs;
+            in_progress_pairs += s.in_progress_pairs;
+            succeeded_pairs += s.succeeded_pairs;
+            failed_pairs += s.failed_pairs;
+            ready_components += s.ready_components;
+            failed_components += s.failed_components;
+        }
+
+        return .{
+            .stream_count = self.stream_count(),
+            .component_count = component_count,
+            .pending_transactions = pending_transactions,
+            .waiting_pairs = waiting_pairs,
+            .in_progress_pairs = in_progress_pairs,
+            .succeeded_pairs = succeeded_pairs,
+            .failed_pairs = failed_pairs,
+            .ready_components = ready_components,
+            .failed_components = failed_components,
+        };
     }
 };
 
@@ -485,4 +532,46 @@ test "ice runtime consent ticking aggregates component failures" {
     try entry.runtime.get_engine(1).?.on_consent_probe_sent(12);
     const summary = runtime.tick_consent_all(17);
     try std.testing.expectEqual(@as(usize, 1), summary.failed_components);
+}
+
+test "ice runtime stats snapshot" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 101 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 101 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 8000);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(25);
+    _ = try runtime.start_next_check_any(prng.random(), 0);
+
+    const snapshot = runtime.stats();
+    try std.testing.expectEqual(@as(usize, 1), snapshot.stream_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.component_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
 }

@@ -14,6 +14,19 @@ pub const PairContext = struct {
     nominated: bool,
 };
 
+pub const ConnectivityEngineStats = struct {
+    component_id: u16,
+    component_state: component_mod.ComponentState,
+    pair_count: usize,
+    waiting_pairs: usize,
+    in_progress_pairs: usize,
+    succeeded_pairs: usize,
+    failed_pairs: usize,
+    pending_transactions: usize,
+    consent_state: consent_mod.ConsentState,
+    consent_missed_probes: u8,
+};
+
 pub const ComponentConnectivityEngine = struct {
     allocator: std.mem.Allocator,
     stream_id: u32,
@@ -151,6 +164,21 @@ pub const ComponentConnectivityEngine = struct {
         if (!self.checklist.has_pending_or_in_progress() and self.checklist.count_state(.succeeded) == 0) {
             self.component.mark_failed();
         }
+    }
+
+    pub fn stats(self: ComponentConnectivityEngine) ConnectivityEngineStats {
+        return .{
+            .component_id = self.component.id,
+            .component_state = self.component.state,
+            .pair_count = self.checklist.pair_count(),
+            .waiting_pairs = self.checklist.count_state(.waiting),
+            .in_progress_pairs = self.checklist.count_state(.in_progress),
+            .succeeded_pairs = self.checklist.count_state(.succeeded),
+            .failed_pairs = self.checklist.count_state(.failed),
+            .pending_transactions = self.tracker.pending_count(),
+            .consent_state = self.consent.state,
+            .consent_missed_probes = self.consent.missed_probes,
+        };
     }
 
     pub fn consent_due_probe(self: ComponentConnectivityEngine, now_ms: u64) bool {
@@ -422,4 +450,28 @@ test "connectivity engine regular nomination upgrade" {
     try std.testing.expectEqual(component_mod.ComponentState.connected, engine.component.state);
     try engine.nominate_pair(700);
     try std.testing.expectEqual(component_mod.ComponentState.ready, engine.component.state);
+}
+
+test "connectivity engine stats snapshot" {
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 8, 1, .{}, .{}, .regular);
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 800,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(19);
+    _ = try engine.start_next_check(prng.random(), 0);
+
+    const snapshot = engine.stats();
+    try std.testing.expectEqual(@as(u16, 1), snapshot.component_id);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.pair_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.in_progress_pairs);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.pending_transactions);
 }
