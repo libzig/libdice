@@ -19,6 +19,13 @@ pub const stun_is_binding_response = @import("protocol/stun/usage_bind.zig").is_
 pub const stun_ice_add_priority = @import("protocol/stun/usage_ice.zig").add_priority;
 pub const stun_ice_add_use_candidate = @import("protocol/stun/usage_ice.zig").add_use_candidate;
 pub const stun_ice_has_use_candidate = @import("protocol/stun/usage_ice.zig").has_use_candidate;
+pub const stun_turn_build_allocate_request = @import("protocol/stun/usage_turn.zig").build_allocate_request;
+pub const stun_turn_build_refresh_request = @import("protocol/stun/usage_turn.zig").build_refresh_request;
+pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
+pub const stun_turn_is_allocate_error_response = @import("protocol/stun/usage_turn.zig").is_allocate_error_response;
+pub const stun_turn_read_lifetime_seconds = @import("protocol/stun/usage_turn.zig").read_lifetime_seconds;
+pub const stun_turn_read_requested_transport = @import("protocol/stun/usage_turn.zig").read_requested_transport;
+pub const stun_turn_read_error_code = @import("protocol/stun/usage_turn.zig").read_error_code;
 pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
 pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
@@ -141,4 +148,23 @@ test "stun ice usage exports are reachable" {
     const bytes = try builder.finish();
     const view = try parse_stun_message(bytes);
     try std.testing.expect(try stun_ice_has_use_candidate(view));
+}
+
+test "stun turn usage exports are reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [128]u8 = undefined;
+
+    const bytes = try stun_turn_build_allocate_request(&packet, tx_id, .{
+        .lifetime_seconds = 300,
+    });
+
+    const view = try parse_stun_message(bytes);
+    const lifetime = try stun_turn_read_lifetime_seconds(view);
+    try std.testing.expectEqual(@as(u32, 300), lifetime.?);
+
+    const transport = try stun_turn_read_requested_transport(view);
+    try std.testing.expect(transport != null);
+    try std.testing.expect(!stun_turn_is_allocate_success_response(view));
+    try std.testing.expect(!stun_turn_is_allocate_error_response(view));
+    try std.testing.expectEqual(@as(?u16, null), try stun_turn_read_error_code(view));
 }
