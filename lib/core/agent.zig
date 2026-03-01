@@ -101,6 +101,25 @@ pub const Agent = struct {
         return stream.remote_candidate_count(component_id);
     }
 
+    pub fn add_remote_candidates(self: *Agent, stream_id: u32, values: []const candidate.Candidate) !usize {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        var added: usize = 0;
+        for (values) |value| {
+            if (try stream.add_remote_candidate(value)) added += 1;
+        }
+        return added;
+    }
+
+    pub fn copy_local_candidates(self: *Agent, allocator: std.mem.Allocator, stream_id: u32, component_filter: ?u16) ![]candidate.Candidate {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.copy_local_candidates(allocator, component_filter);
+    }
+
+    pub fn copy_remote_candidates(self: *Agent, allocator: std.mem.Allocator, stream_id: u32, component_filter: ?u16) ![]candidate.Candidate {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.copy_remote_candidates(allocator, component_filter);
+    }
+
     pub fn gather_host_candidates(
         self: *Agent,
         stream_id: u32,
@@ -263,4 +282,41 @@ test "agent populates runtime checklists from stream candidates" {
     const summary = try agent.populate_stream_checklists(stream_id, &runtime, true, 2000);
     try std.testing.expectEqual(@as(usize, 1), summary.generated);
     try std.testing.expectEqual(@as(usize, 1), summary.added);
+}
+
+test "agent remote candidate batch add and copy" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const a1: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 10 }, .port = 6000 } };
+    const a2: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 11 }, .port = 6001 } };
+
+    const batch = [_]candidate.Candidate{
+        .{
+            .id = 1,
+            .component_id = 1,
+            .candidate_type = .srflx,
+            .transport = .udp,
+            .foundation = candidate.compute_foundation(.udp, .srflx, a1),
+            .priority = candidate.compute_candidate_priority(.srflx, 10, 1),
+            .address = a1,
+        },
+        .{
+            .id = 2,
+            .component_id = 1,
+            .candidate_type = .relay,
+            .transport = .udp,
+            .foundation = candidate.compute_foundation(.udp, .relay, a2),
+            .priority = candidate.compute_candidate_priority(.relay, 1, 1),
+            .address = a2,
+        },
+    };
+
+    const added = try agent.add_remote_candidates(stream_id, &batch);
+    try std.testing.expectEqual(@as(usize, 2), added);
+
+    const copied = try agent.copy_remote_candidates(std.testing.allocator, stream_id, 1);
+    defer std.testing.allocator.free(copied);
+    try std.testing.expectEqual(@as(usize, 2), copied.len);
 }

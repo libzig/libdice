@@ -28,6 +28,7 @@ pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
 pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
 pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
 pub const IceRuntimeRestartSummary = @import("core/ice_runtime.zig").RestartSummary;
+pub const IceRuntimeRemoteBatchExpandSummary = @import("core/ice_runtime.zig").RemoteBatchExpandSummary;
 pub const IceRuntimeConsentTickSummary = @import("core/ice_runtime.zig").ConsentTickSummary;
 pub const IceRuntimeStats = @import("core/ice_runtime.zig").IceRuntimeStats;
 pub const IceRuntimeEvent = @import("core/ice_runtime.zig").IceEvent;
@@ -322,6 +323,20 @@ test "ice runtime exports are reachable" {
     var ievents: [32]IceRuntimeEvent = undefined;
     const icount = runtime.drain_events(&ievents);
     try std.testing.expect(icount >= 2);
+
+    const remote_batch = [_]Candidate{
+        .{
+            .id = 3,
+            .component_id = 1,
+            .candidate_type = .relay,
+            .transport = .udp,
+            .foundation = candidate_compute_foundation(.udp, .relay, .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 81 }, .port = 6001 } }),
+            .priority = candidate_compute_priority(.relay, 1, 1),
+            .address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 81 }, .port = 6001 } },
+        },
+    };
+    const rb: IceRuntimeRemoteBatchExpandSummary = try runtime.add_remote_candidates_and_expand(stream_id, &remote_batch, true, restarted.pair_summary.next_pair_id);
+    try std.testing.expectEqual(@as(usize, 1), rb.processed);
 }
 
 test "checklist exports are reachable" {

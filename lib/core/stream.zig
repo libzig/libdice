@@ -100,6 +100,42 @@ pub const Stream = struct {
     pub fn remote_candidate_count(self: Stream, component_id: u16) usize {
         return self.remote_candidates.count_for_component(component_id);
     }
+
+    fn copy_candidates_for_component(
+        self: *const Stream,
+        allocator: std.mem.Allocator,
+        source: *const candidate.CandidateList,
+        component_filter: ?u16,
+    ) ![]candidate.Candidate {
+        var count: usize = 0;
+        for (source.items.items) |item| {
+            if (component_filter) |component_id| {
+                if (item.component_id != component_id) continue;
+            }
+            count += 1;
+        }
+
+        var out = try allocator.alloc(candidate.Candidate, count);
+        var idx: usize = 0;
+        for (source.items.items) |item| {
+            if (component_filter) |component_id| {
+                if (item.component_id != component_id) continue;
+            }
+            out[idx] = item;
+            idx += 1;
+        }
+
+        _ = self;
+        return out;
+    }
+
+    pub fn copy_local_candidates(self: *const Stream, allocator: std.mem.Allocator, component_filter: ?u16) ![]candidate.Candidate {
+        return self.copy_candidates_for_component(allocator, &self.local_candidates, component_filter);
+    }
+
+    pub fn copy_remote_candidates(self: *const Stream, allocator: std.mem.Allocator, component_filter: ?u16) ![]candidate.Candidate {
+        return self.copy_candidates_for_component(allocator, &self.remote_candidates, component_filter);
+    }
 };
 
 test "stream manages components" {
@@ -165,4 +201,40 @@ test "stream candidate storage by component" {
     try std.testing.expectEqual(@as(usize, 1), stream.local_candidate_count(1));
     try std.testing.expectEqual(@as(usize, 1), stream.remote_candidate_count(2));
     try std.testing.expectEqual(@as(usize, 0), stream.remote_candidate_count(1));
+}
+
+test "stream candidate copy helpers" {
+    var stream = Stream.init(std.testing.allocator, 4);
+    defer stream.deinit();
+
+    const a1: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 10 }, .port = 7000 } };
+    const a2: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 11 }, .port = 7001 } };
+
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, a1),
+        .priority = candidate.compute_candidate_priority(.host, 1, 1),
+        .address = a1,
+    }));
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 2,
+        .component_id = 2,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, a2),
+        .priority = candidate.compute_candidate_priority(.host, 1, 2),
+        .address = a2,
+    }));
+
+    const all = try stream.copy_local_candidates(std.testing.allocator, null);
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+
+    const comp2 = try stream.copy_local_candidates(std.testing.allocator, 2);
+    defer std.testing.allocator.free(comp2);
+    try std.testing.expectEqual(@as(usize, 1), comp2.len);
+    try std.testing.expectEqual(@as(u16, 2), comp2[0].component_id);
 }

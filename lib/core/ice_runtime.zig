@@ -48,6 +48,14 @@ pub const RestartSummary = struct {
     pair_summary: pair_builder.PairBuildSummary,
 };
 
+pub const RemoteBatchExpandSummary = struct {
+    stream_id: u32,
+    processed: usize,
+    remote_added: usize,
+    new_pairs: usize,
+    next_pair_id: u64,
+};
+
 const RuntimeEntry = struct {
     stream_id: u32,
     runtime: stream_connectivity.StreamConnectivityRuntime,
@@ -173,6 +181,40 @@ pub const IceRuntime = struct {
         return .{
             .remote_added = remote_added,
             .pair_summary = pair_summary,
+        };
+    }
+
+    pub fn add_remote_candidates_and_expand(
+        self: *IceRuntime,
+        stream_id: u32,
+        remote_candidates: []const candidate.Candidate,
+        controlling: bool,
+        start_pair_id: u64,
+    ) !RemoteBatchExpandSummary {
+        var next_pair_id = start_pair_id;
+        var processed: usize = 0;
+        var remote_added_count: usize = 0;
+        var new_pairs: usize = 0;
+
+        for (remote_candidates) |remote_candidate| {
+            const summary = try self.add_remote_candidate_and_expand(
+                stream_id,
+                remote_candidate,
+                controlling,
+                next_pair_id,
+            );
+            processed += 1;
+            if (summary.remote_added) remote_added_count += 1;
+            new_pairs += summary.pair_summary.added;
+            next_pair_id = summary.pair_summary.next_pair_id;
+        }
+
+        return .{
+            .stream_id = stream_id,
+            .processed = processed,
+            .remote_added = remote_added_count,
+            .new_pairs = new_pairs,
+            .next_pair_id = next_pair_id,
         };
     }
 
@@ -389,6 +431,54 @@ test "ice runtime trickle remote candidate expansion" {
     try std.testing.expect(second.remote_added);
     try std.testing.expectEqual(@as(usize, 2), second.pair_summary.generated);
     try std.testing.expectEqual(@as(usize, 1), second.pair_summary.added);
+}
+
+test "ice runtime remote batch expansion" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 111 }, .port = 5000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    const remote_batch = [_]candidate.Candidate{
+        .{
+            .id = 20,
+            .component_id = 1,
+            .candidate_type = .srflx,
+            .transport = .udp,
+            .foundation = candidate.compute_foundation(.udp, .srflx, .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 111 }, .port = 6000 } }),
+            .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+            .address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 111 }, .port = 6000 } },
+        },
+        .{
+            .id = 21,
+            .component_id = 1,
+            .candidate_type = .relay,
+            .transport = .udp,
+            .foundation = candidate.compute_foundation(.udp, .relay, .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 112 }, .port = 6001 } }),
+            .priority = candidate.compute_candidate_priority(.relay, 1, 1),
+            .address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 112 }, .port = 6001 } },
+        },
+    };
+
+    const summary = try runtime.add_remote_candidates_and_expand(stream_id, &remote_batch, true, 9000);
+    try std.testing.expectEqual(@as(usize, 2), summary.processed);
+    try std.testing.expectEqual(@as(usize, 2), summary.remote_added);
+    try std.testing.expectEqual(@as(usize, 2), summary.new_pairs);
+    try std.testing.expectEqual(@as(u64, 9002), summary.next_pair_id);
 }
 
 test "ice runtime timeout aggregation across streams" {
