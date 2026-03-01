@@ -9,6 +9,31 @@ pub const ParseError = error{
     InvalidLength,
 };
 
+pub const MessageClass = enum(u2) {
+    request = 0,
+    indication = 1,
+    success_response = 2,
+    error_response = 3,
+};
+
+pub fn message_class(message_type: u16) MessageClass {
+    const c0 = (message_type >> 4) & 0x1;
+    const c1 = (message_type >> 8) & 0x1;
+    const class_bits: u2 = @intCast(c0 | (c1 << 1));
+    return @enumFromInt(class_bits);
+}
+
+pub fn is_response_type(message_type: u16) bool {
+    return switch (message_class(message_type)) {
+        .success_response, .error_response => true,
+        else => false,
+    };
+}
+
+pub fn is_error_response_type(message_type: u16) bool {
+    return message_class(message_type) == .error_response;
+}
+
 pub const Header = struct {
     message_type: u16,
     message_length: u16,
@@ -100,4 +125,17 @@ test "decode rejects invalid body length alignment" {
     };
 
     try std.testing.expectError(ParseError.InvalidLength, Header.decode(&packet));
+}
+
+test "message class helpers" {
+    try std.testing.expectEqual(MessageClass.request, message_class(0x0001));
+    try std.testing.expectEqual(MessageClass.indication, message_class(0x0016));
+    try std.testing.expectEqual(MessageClass.success_response, message_class(0x0101));
+    try std.testing.expectEqual(MessageClass.error_response, message_class(0x0111));
+
+    try std.testing.expect(!is_response_type(0x0001));
+    try std.testing.expect(is_response_type(0x0101));
+    try std.testing.expect(is_response_type(0x0111));
+    try std.testing.expect(is_error_response_type(0x0111));
+    try std.testing.expect(!is_error_response_type(0x0101));
 }

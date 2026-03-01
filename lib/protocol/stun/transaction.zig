@@ -1,5 +1,6 @@
 const std = @import("std");
 const message = @import("message.zig");
+const parser = @import("parser.zig");
 const timer = @import("timer.zig");
 
 pub const TransactionId = [12]u8;
@@ -13,6 +14,22 @@ pub const PendingTransaction = struct {
     transmissions_sent: u8,
     next_retransmit_at_ms: u64,
     expire_at_ms: u64,
+};
+
+pub const MatchedResponse = struct {
+    transaction_id: TransactionId,
+    user_tag: u64,
+    rtt_ms: u64,
+    transmissions_sent: u8,
+    message_type: u16,
+    message_class: message.MessageClass,
+    is_error_response: bool,
+};
+
+pub const MatchError = parser.ParserError || error{
+    NotResponse,
+    UnknownTransaction,
+    ClockSkew,
 };
 
 pub const TransactionStore = struct {
@@ -57,6 +74,26 @@ pub const TransactionStore = struct {
 
     pub fn acknowledge(self: *TransactionStore, transaction_id: TransactionId) bool {
         return self.map.remove(transaction_id);
+    }
+
+    pub fn match_response(self: *TransactionStore, view: parser.MessageView, now_ms: u64) MatchError!MatchedResponse {
+        if (!message.is_response_type(view.header.message_type)) return error.NotResponse;
+
+        const tx = self.map.get(view.header.transaction_id) orelse return error.UnknownTransaction;
+        if (now_ms < tx.first_sent_ms) return error.ClockSkew;
+
+        const matched = MatchedResponse{
+            .transaction_id = view.header.transaction_id,
+            .user_tag = tx.user_tag,
+            .rtt_ms = now_ms - tx.first_sent_ms,
+            .transmissions_sent = tx.transmissions_sent,
+            .message_type = view.header.message_type,
+            .message_class = message.message_class(view.header.message_type),
+            .is_error_response = message.is_error_response_type(view.header.message_type),
+        };
+
+        _ = self.map.remove(view.header.transaction_id);
+        return matched;
     }
 
     pub fn collect_due_retransmits(self: *TransactionStore, now_ms: u64, out: []TransactionId) usize {
@@ -222,4 +259,65 @@ test "transaction store expires old entries" {
     try std.testing.expectEqual(@as(usize, 1), removed);
     try std.testing.expectEqualDeep(a, expired[0]);
     try std.testing.expectEqual(@as(usize, 1), store.count());
+}
+
+test "transaction store matches success response and removes entry" {
+    var store = TransactionStore.init(std.testing.allocator, .{});
+    defer store.deinit();
+
+    const tx_id = [_]u8{ 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
+    try store.start(tx_id, 1000, 123);
+    try store.mark_retransmitted(tx_id, 1500);
+
+    var packet: [message.header_size]u8 = undefined;
+    const header = message.Header.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+
+    const view = try parser.parse_message(&packet);
+    const matched = try store.match_response(view, 1800);
+    try std.testing.expectEqualDeep(tx_id, matched.transaction_id);
+    try std.testing.expectEqual(@as(u64, 123), matched.user_tag);
+    try std.testing.expectEqual(@as(u64, 800), matched.rtt_ms);
+    try std.testing.expectEqual(@as(u8, 2), matched.transmissions_sent);
+    try std.testing.expectEqual(message.MessageClass.success_response, matched.message_class);
+    try std.testing.expect(!matched.is_error_response);
+    try std.testing.expectEqual(@as(usize, 0), store.count());
+}
+
+test "transaction store matches error response" {
+    var store = TransactionStore.init(std.testing.allocator, .{});
+    defer store.deinit();
+
+    const tx_id = [_]u8{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8 };
+    try store.start(tx_id, 100, 5);
+
+    var packet: [message.header_size]u8 = undefined;
+    const header = message.Header.init(0x0111, 0, tx_id);
+    _ = try header.encode(&packet);
+
+    const view = try parser.parse_message(&packet);
+    const matched = try store.match_response(view, 200);
+    try std.testing.expect(matched.is_error_response);
+    try std.testing.expectEqual(message.MessageClass.error_response, matched.message_class);
+}
+
+test "transaction store rejects non-response or unknown tx" {
+    var store = TransactionStore.init(std.testing.allocator, .{});
+    defer store.deinit();
+
+    const tx_id = [_]u8{ 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 };
+    try store.start(tx_id, 100, 5);
+
+    var request_packet: [message.header_size]u8 = undefined;
+    const request_header = message.Header.init(0x0001, 0, tx_id);
+    _ = try request_header.encode(&request_packet);
+    const request_view = try parser.parse_message(&request_packet);
+    try std.testing.expectError(error.NotResponse, store.match_response(request_view, 200));
+
+    var unknown_packet: [message.header_size]u8 = undefined;
+    const unknown_tx = [_]u8{ 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
+    const unknown_header = message.Header.init(0x0101, 0, unknown_tx);
+    _ = try unknown_header.encode(&unknown_packet);
+    const unknown_view = try parser.parse_message(&unknown_packet);
+    try std.testing.expectError(error.UnknownTransaction, store.match_response(unknown_view, 200));
 }

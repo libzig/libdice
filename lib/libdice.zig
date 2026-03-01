@@ -6,6 +6,7 @@ pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
 pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
+pub const StunMessageClass = @import("protocol/stun/message.zig").MessageClass;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
 pub const StunAddress = @import("protocol/stun/address_attrs.zig").StunAddress;
 pub const TurnChannelDataFrameView = @import("protocol/turn/channel_data.zig").FrameView;
@@ -15,9 +16,13 @@ pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
 pub const StunRetryPolicy = @import("protocol/stun/timer.zig").RetryPolicy;
 pub const StunPendingTransaction = @import("protocol/stun/transaction.zig").PendingTransaction;
+pub const StunMatchedResponse = @import("protocol/stun/transaction.zig").MatchedResponse;
 pub const StunTransactionStore = @import("protocol/stun/transaction.zig").TransactionStore;
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
+pub const stun_message_class = @import("protocol/stun/message.zig").message_class;
+pub const stun_is_response_type = @import("protocol/stun/message.zig").is_response_type;
+pub const stun_is_error_response_type = @import("protocol/stun/message.zig").is_error_response_type;
 pub const stun_build_binding_request = @import("protocol/stun/usage_bind.zig").build_binding_request;
 pub const stun_build_binding_success_response = @import("protocol/stun/usage_bind.zig").build_binding_success_response;
 pub const stun_parse_binding_response = @import("protocol/stun/usage_bind.zig").parse_binding_response;
@@ -138,6 +143,15 @@ test "stun transaction exports are reachable" {
     defer store.deinit();
     try store.start(tx, 0, 9);
     try std.testing.expectEqual(@as(usize, 1), store.count());
+
+    var packet: [20]u8 = undefined;
+    const response_header = StunHeader.init(0x0101, 0, tx);
+    _ = try response_header.encode(&packet);
+    const view = try parse_stun_message(&packet);
+    const matched: StunMatchedResponse = try store.match_response(view, 10);
+    try std.testing.expectEqual(StunMessageClass.success_response, matched.message_class);
+    try std.testing.expect(stun_is_response_type(matched.message_type));
+    try std.testing.expect(!stun_is_error_response_type(matched.message_type));
 }
 
 test "crypto exports are reachable" {
