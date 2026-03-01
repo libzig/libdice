@@ -13,6 +13,9 @@ pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
+pub const stun_build_binding_request = @import("protocol/stun/usage_bind.zig").build_binding_request;
+pub const stun_is_binding_request = @import("protocol/stun/usage_bind.zig").is_binding_request;
+pub const stun_is_binding_response = @import("protocol/stun/usage_bind.zig").is_binding_response;
 pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
 pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
@@ -112,4 +115,14 @@ test "stun integrity exports are reachable" {
     try std.testing.expect(fp != 0);
     try std.testing.expectEqual(@as(u16, 0x0008), stun_message_integrity_type);
     try std.testing.expectEqual(@as(u16, 0x8028), stun_fingerprint_type);
+}
+
+test "stun bind usage exports are reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [64]u8 = undefined;
+
+    const bytes = try stun_build_binding_request(&packet, tx_id, null, null);
+    const view = try parse_stun_message(bytes);
+    try std.testing.expect(stun_is_binding_request(view));
+    try std.testing.expect(!stun_is_binding_response(view));
 }
