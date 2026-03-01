@@ -6,6 +6,7 @@ const udp_dispatch = @import("udp_dispatch.zig");
 const turn_socket_udp = @import("turn_socket_udp.zig");
 const usage_ice = @import("../protocol/stun/usage_ice.zig");
 const usage_turn = @import("../protocol/stun/usage_turn.zig");
+const address_attrs = @import("../protocol/stun/address_attrs.zig");
 const parser = @import("../protocol/stun/parser.zig");
 
 pub const PollSummary = struct {
@@ -54,15 +55,41 @@ pub const BidirectionalAdvanceSummary = struct {
     failed_consents: usize,
 };
 
+pub const TurnMaintenanceOptions = struct {
+    allocation_refresh_margin_ms: u64 = 60_000,
+    permission_refresh_margin_ms: u64 = 60_000,
+    channel_refresh_margin_ms: u64 = 60_000,
+    refresh_lifetime_seconds: ?u32 = null,
+    username: ?[]const u8 = null,
+    realm: ?[]const u8 = null,
+    nonce: ?[]const u8 = null,
+    integrity_key: ?[]const u8 = null,
+    include_fingerprint: bool = false,
+};
+
+pub const TurnMaintenanceSummary = struct {
+    allocation_refreshes_sent: usize,
+    permission_refreshes_sent: usize,
+    channel_refreshes_sent: usize,
+    permissions_pruned: usize,
+    channels_pruned: usize,
+
+    pub fn total_sent(self: TurnMaintenanceSummary) usize {
+        return self.allocation_refreshes_sent + self.permission_refreshes_sent + self.channel_refreshes_sent;
+    }
+};
+
 pub const IoTickOptions = struct {
     max_starts_per_tick: usize = 8,
     outbound_options: OutboundCheckOptions = .{},
     bidirectional_options: BidirectionalAdvanceOptions = .{},
+    turn_maintenance: ?TurnMaintenanceOptions = null,
 };
 
 pub const IoTickSummary = struct {
     started_checks: usize,
     retransmits_sent: usize,
+    turn_maintenance_sent: usize,
     advance: BidirectionalAdvanceSummary,
 };
 
@@ -78,6 +105,7 @@ pub const PumpOnceOptions = struct {
 pub const PumpOnceSummary = struct {
     started_checks: usize,
     retransmits_sent: usize,
+    turn_maintenance_sent: usize,
     packets_seen: usize,
     completed_checks: usize,
     requests_handled: usize,
@@ -478,6 +506,12 @@ pub const IceUdpRuntimeBridge = struct {
             retransmit_sink[0..],
         );
 
+        var turn_maintenance_sent: usize = 0;
+        if (options.turn_maintenance) |maintenance| {
+            const turn_summary = try self.run_turn_maintenance(random, now_ms, outbound_packet_buf, maintenance);
+            turn_maintenance_sent = turn_summary.total_sent();
+        }
+
         const advance_summary = try self.advance_bidirectional(
             now_ms,
             recv_buf,
@@ -490,6 +524,7 @@ pub const IceUdpRuntimeBridge = struct {
         return .{
             .started_checks = started_checks,
             .retransmits_sent = retransmits_sent,
+            .turn_maintenance_sent = turn_maintenance_sent,
             .advance = advance_summary,
         };
     }
@@ -659,6 +694,7 @@ pub const IceUdpRuntimeBridge = struct {
         return .{
             .started_checks = tick.io.started_checks,
             .retransmits_sent = tick.io.retransmits_sent,
+            .turn_maintenance_sent = tick.io.turn_maintenance_sent,
             .packets_seen = tick.io.advance.packets_seen,
             .completed_checks = tick.io.advance.completed_checks,
             .requests_handled = tick.io.advance.requests_handled,
@@ -761,6 +797,69 @@ pub const IceUdpRuntimeBridge = struct {
         return written;
     }
 
+    pub fn run_turn_maintenance(
+        self: *IceUdpRuntimeBridge,
+        random: std.Random,
+        now_ms: u64,
+        packet_buf: []u8,
+        options: TurnMaintenanceOptions,
+    ) !TurnMaintenanceSummary {
+        var summary = TurnMaintenanceSummary{
+            .allocation_refreshes_sent = 0,
+            .permission_refreshes_sent = 0,
+            .channel_refreshes_sent = 0,
+            .permissions_pruned = 0,
+            .channels_pruned = 0,
+        };
+
+        for (self.turn_bindings.items) |*binding| {
+            if (binding.socket.allocation) |lease| {
+                if (now_ms >= lease.refresh_due_at_ms(options.allocation_refresh_margin_ms)) {
+                    const tx_id = stun_tx_from_rng(random);
+                    _ = try binding.socket.send_refresh_request(packet_buf, tx_id, options.refresh_lifetime_seconds, options.nonce, options.realm, options.username);
+                    summary.allocation_refreshes_sent += 1;
+                }
+            }
+
+            var due_permissions: [16]candidate.Address = undefined;
+            const due_permission_count = binding.socket.collect_due_permission_refreshes(now_ms, options.permission_refresh_margin_ms, &due_permissions);
+            for (due_permissions[0..@min(due_permissions.len, due_permission_count)]) |peer| {
+                const tx_id = stun_tx_from_rng(random);
+                const peers = [_]address_attrs.StunAddress{candidate_to_stun_address(peer)};
+                _ = try binding.socket.send_create_permission_request(packet_buf, tx_id, .{
+                    .peer_addresses = &peers,
+                    .username = options.username,
+                    .realm = options.realm,
+                    .nonce = options.nonce,
+                    .integrity_key = options.integrity_key,
+                    .include_fingerprint = options.include_fingerprint,
+                });
+                summary.permission_refreshes_sent += 1;
+            }
+
+            var due_channels: [16]turn_socket_udp.ChannelBinding = undefined;
+            const due_channel_count = binding.socket.collect_due_channel_refreshes(now_ms, options.channel_refresh_margin_ms, &due_channels);
+            for (due_channels[0..@min(due_channels.len, due_channel_count)]) |entry| {
+                const tx_id = stun_tx_from_rng(random);
+                _ = try binding.socket.send_channel_bind_request(packet_buf, tx_id, .{
+                    .channel_number = entry.channel_number,
+                    .peer_address = candidate_to_stun_address(entry.peer),
+                    .username = options.username,
+                    .realm = options.realm,
+                    .nonce = options.nonce,
+                    .integrity_key = options.integrity_key,
+                    .include_fingerprint = options.include_fingerprint,
+                });
+                summary.channel_refreshes_sent += 1;
+            }
+
+            summary.permissions_pruned += binding.socket.prune_expired_permissions(now_ms);
+            summary.channels_pruned += binding.socket.prune_expired_channel_bindings(now_ms);
+        }
+
+        return summary;
+    }
+
     const TurnDrainSummary = struct {
         packets_seen: usize,
         completed_checks: usize,
@@ -836,6 +935,19 @@ pub const IceUdpRuntimeBridge = struct {
         return summary;
     }
 };
+
+fn candidate_to_stun_address(address: candidate.Address) address_attrs.StunAddress {
+    return switch (address) {
+        .ipv4 => |v4| .{ .ipv4 = .{ .port = v4.port, .ip = v4.ip } },
+        .ipv6 => |v6| .{ .ipv6 = .{ .port = v6.port, .ip = v6.ip } },
+    };
+}
+
+fn stun_tx_from_rng(random: std.Random) [12]u8 {
+    var tx_id: [12]u8 = undefined;
+    random.bytes(&tx_id);
+    return tx_id;
+}
 
 test "udp bridge routes stun response into ice runtime" {
     var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
@@ -1788,7 +1900,6 @@ test "udp bridge routes relay local candidate checks through TURN send indicatio
 
 test "udp bridge completes relay connectivity check from TURN data indication" {
     const encoder = @import("../protocol/stun/encoder.zig");
-    const address_attrs = @import("../protocol/stun/address_attrs.zig");
 
     var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
     defer turn_server.deinit();
@@ -1939,4 +2050,122 @@ test "udp bridge send_via_pair sends relayed payload for relay local candidate" 
     const view = try parser.parse_message(recv[0..got.bytes]);
     try std.testing.expectEqual(@as(u16, usage_turn.send_indication_type), view.header.message_type);
     try std.testing.expectEqualStrings("relay-data", (try usage_turn.read_data_attr(view)).?);
+}
+
+test "udp bridge turn maintenance sends refresh requests and prunes expired entries" {
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    binding.socket.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 600,
+        .expires_at_ms = 10_000,
+    };
+
+    const due_peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 100 }, .port = 5000 } };
+    const expired_peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 101 }, .port = 5001 } };
+    try binding.socket.set_permission(due_peer, 4_000, 6);
+    try binding.socket.set_permission(expired_peer, 0, 1);
+
+    try binding.socket.set_channel_binding(0x4011, due_peer, 4_000, 6);
+    try binding.socket.set_channel_binding(0x4012, expired_peer, 0, 1);
+
+    var prng = std.Random.DefaultPrng.init(47);
+    var packet_buf: [512]u8 = undefined;
+    const summary = try bridge.run_turn_maintenance(prng.random(), 9_500, &packet_buf, .{
+        .allocation_refresh_margin_ms = 1_000,
+        .permission_refresh_margin_ms = 1_000,
+        .channel_refresh_margin_ms = 1_000,
+        .username = "u",
+        .realm = "r",
+        .nonce = "n",
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), summary.allocation_refreshes_sent);
+    try std.testing.expectEqual(@as(usize, 1), summary.permission_refreshes_sent);
+    try std.testing.expectEqual(@as(usize, 1), summary.channel_refreshes_sent);
+    try std.testing.expectEqual(@as(usize, 1), summary.permissions_pruned);
+    try std.testing.expectEqual(@as(usize, 1), summary.channels_pruned);
+
+    var refresh_count: usize = 0;
+    var permission_count: usize = 0;
+    var channel_bind_count: usize = 0;
+    var recv: [512]u8 = undefined;
+    while (true) {
+        const got = turn_server.recv_from(&recv) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+        const view = try parser.parse_message(recv[0..got.bytes]);
+        switch (view.header.message_type) {
+            usage_turn.refresh_request_type => refresh_count += 1,
+            usage_turn.create_permission_request_type => permission_count += 1,
+            0x0009 => channel_bind_count += 1,
+            else => {},
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), refresh_count);
+    try std.testing.expectEqual(@as(usize, 1), permission_count);
+    try std.testing.expectEqual(@as(usize, 1), channel_bind_count);
+}
+
+test "udp bridge io tick reports turn maintenance sends" {
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    binding.socket.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 600,
+        .expires_at_ms = 10_000,
+    };
+
+    var prng = std.Random.DefaultPrng.init(48);
+    var outbound_buf: [256]u8 = undefined;
+    var recv_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    var timed_out: [1]ice_runtime.TimedOutCheck = undefined;
+    const tick = try bridge.run_io_tick(
+        prng.random(),
+        9_500,
+        &outbound_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        .{ .turn_maintenance = .{ .allocation_refresh_margin_ms = 1_000 } },
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), tick.turn_maintenance_sent);
 }

@@ -213,6 +213,7 @@ pub const TurnUdpSocket = struct {
     pub fn collect_due_permission_refreshes(self: *TurnUdpSocket, now_ms: u64, refresh_margin_ms: u64, out: []candidate.Address) usize {
         var due: usize = 0;
         for (self.permissions.items) |entry| {
+            if (entry.expires_at_ms <= now_ms) continue;
             if (now_ms < entry.refresh_due_at_ms(refresh_margin_ms)) continue;
             if (due < out.len) out[due] = entry.peer;
             due += 1;
@@ -241,6 +242,7 @@ pub const TurnUdpSocket = struct {
     pub fn collect_due_channel_refreshes(self: *TurnUdpSocket, now_ms: u64, refresh_margin_ms: u64, out: []ChannelBinding) usize {
         var due: usize = 0;
         for (self.channels.items) |entry| {
+            if (entry.expires_at_ms <= now_ms) continue;
             if (now_ms < entry.refresh_due_at_ms(refresh_margin_ms)) continue;
             if (due < out.len) out[due] = entry;
             due += 1;
@@ -496,4 +498,24 @@ test "turn udp socket tracks permissions and channel bindings" {
     try std.testing.expectEqual(@as(usize, 0), turn.permission_count());
     try std.testing.expectEqual(@as(usize, 1), turn.prune_expired_channel_bindings(900_001));
     try std.testing.expectEqual(@as(usize, 0), turn.channel_binding_count());
+}
+
+test "turn udp socket due refresh collectors skip already expired entries" {
+    var turn = try TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+    defer turn.deinit();
+
+    const peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 20 }, .port = 6000 } };
+    try turn.set_permission(peer, 0, 1);
+    try turn.set_channel_binding(0x4010, peer, 0, 1);
+
+    var due_permissions: [2]candidate.Address = undefined;
+    var due_channels: [2]ChannelBinding = undefined;
+    const p_due = turn.collect_due_permission_refreshes(2_000, 60_000, &due_permissions);
+    const c_due = turn.collect_due_channel_refreshes(2_000, 60_000, &due_channels);
+    try std.testing.expectEqual(@as(usize, 0), p_due);
+    try std.testing.expectEqual(@as(usize, 0), c_due);
 }
