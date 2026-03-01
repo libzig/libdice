@@ -4,6 +4,7 @@ const candidate = @import("candidate.zig");
 const discovery = @import("discovery.zig");
 const stream_connectivity = @import("stream_connectivity.zig");
 const pair_builder = @import("pair_builder.zig");
+const signaling = @import("signaling.zig");
 
 pub const GatherSummary = struct {
     generated: usize,
@@ -12,6 +13,9 @@ pub const GatherSummary = struct {
 };
 
 pub const PairBuildSummary = pair_builder.PairBuildSummary;
+pub const StreamDescription = signaling.StreamDescription;
+pub const RemoteDescription = signaling.RemoteDescription;
+pub const ApplySummary = signaling.ApplySummary;
 
 pub const Agent = struct {
     allocator: std.mem.Allocator,
@@ -118,6 +122,16 @@ pub const Agent = struct {
     pub fn copy_remote_candidates(self: *Agent, allocator: std.mem.Allocator, stream_id: u32, component_filter: ?u16) ![]candidate.Candidate {
         const stream = self.get_stream(stream_id) orelse return error.NotFound;
         return stream.copy_remote_candidates(allocator, component_filter);
+    }
+
+    pub fn build_local_description(self: *Agent, allocator: std.mem.Allocator, stream_id: u32, component_filter: ?u16) !StreamDescription {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return signaling.build_local_description(allocator, stream, component_filter);
+    }
+
+    pub fn apply_remote_description(self: *Agent, stream_id: u32, remote: RemoteDescription) !ApplySummary {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return signaling.apply_remote_description(stream, remote);
     }
 
     pub fn gather_host_candidates(
@@ -319,4 +333,40 @@ test "agent remote candidate batch add and copy" {
     const copied = try agent.copy_remote_candidates(std.testing.allocator, stream_id, 1);
     defer std.testing.allocator.free(copied);
     try std.testing.expectEqual(@as(usize, 2), copied.len);
+}
+
+test "agent signaling roundtrip between local and remote stream" {
+    var a = Agent.init(std.testing.allocator);
+    defer a.deinit();
+    var b = Agent.init(std.testing.allocator);
+    defer b.deinit();
+
+    const sa = try a.add_stream(1);
+    const sb = try b.add_stream(1);
+
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 120 }, .port = 5000 } };
+    const local_candidate = candidate.Candidate{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = local_addr,
+    };
+
+    try std.testing.expect(try a.add_local_candidate(sa, local_candidate));
+    try a.get_stream(sa).?.set_local_credentials("ua", "pa");
+
+    var local_desc = try a.build_local_description(std.testing.allocator, sa, null);
+    defer local_desc.deinit(std.testing.allocator);
+
+    const applied = try b.apply_remote_description(sb, .{
+        .credentials = local_desc.credentials,
+        .candidates = local_desc.candidates,
+    });
+
+    try std.testing.expect(applied.credentials_updated);
+    try std.testing.expectEqual(@as(usize, 1), applied.candidates_added);
+    try std.testing.expectEqual(@as(usize, 1), try b.remote_candidate_count(sb, 1));
 }

@@ -39,6 +39,11 @@ pub const checklist_compute_pair_priority = @import("core/checklist.zig").comput
 pub const Agent = @import("core/agent.zig").Agent;
 pub const Stream = @import("core/stream.zig").Stream;
 pub const Credentials = @import("core/stream.zig").Credentials;
+pub const StreamDescription = @import("core/signaling.zig").StreamDescription;
+pub const RemoteDescription = @import("core/signaling.zig").RemoteDescription;
+pub const ApplySummary = @import("core/signaling.zig").ApplySummary;
+pub const build_local_description = @import("core/signaling.zig").build_local_description;
+pub const apply_remote_description = @import("core/signaling.zig").apply_remote_description;
 pub const Candidate = @import("core/candidate.zig").Candidate;
 pub const CandidateType = @import("core/candidate.zig").CandidateType;
 pub const CandidateTransport = @import("core/candidate.zig").Transport;
@@ -391,6 +396,16 @@ test "agent stream component exports are reachable" {
     const components = [_]u16{1};
     const gathered: AgentGatherSummary = try agent.gather_host_candidates(stream_id, &interfaces, &components, 1000, true);
     try std.testing.expectEqual(@as(usize, 1), gathered.generated);
+
+    try stream.set_local_credentials("ux", "px");
+
+    var desc: StreamDescription = try agent.build_local_description(std.testing.allocator, stream_id, null);
+    defer desc.deinit(std.testing.allocator);
+    const applied: ApplySummary = try apply_remote_description(stream, .{
+        .credentials = desc.credentials,
+        .candidates = desc.candidates,
+    });
+    try std.testing.expect(applied.credentials_updated);
 }
 
 test "stun header export is reachable" {
