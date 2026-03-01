@@ -5,6 +5,10 @@ pub const EventTask = @import("core/events.zig").Task;
 pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
 pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
+pub const ConnectivityCheckTracker = @import("core/conncheck.zig").ConnectivityCheckTracker;
+pub const ConnectivityCheckMeta = @import("core/conncheck.zig").CheckMeta;
+pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCheck;
+pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunMessageClass = @import("protocol/stun/message.zig").MessageClass;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
@@ -100,6 +104,23 @@ test "timer wheel export is reachable" {
     defer wheel.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), wheel.pending_count());
+}
+
+test "connectivity check tracker export is reachable" {
+    var tracker = ConnectivityCheckTracker.init(std.testing.allocator, StunRetryPolicy{});
+    defer tracker.deinit();
+
+    const tx_id = [_]u8{ 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41 };
+    try tracker.start_check(tx_id, 0, 1, .{ .stream_id = 1, .component_id = 1, .candidate_pair_id = 1 });
+    try std.testing.expectEqual(@as(usize, 1), tracker.pending_count());
+
+    var packet: [20]u8 = undefined;
+    const header = StunHeader.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+
+    const view = try parse_stun_message(&packet);
+    const completed: CompletedConnectivityCheck = try tracker.on_response(view, 10);
+    try std.testing.expectEqual(@as(u64, 1), completed.user_tag);
 }
 
 test "stun header export is reachable" {
