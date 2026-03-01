@@ -105,6 +105,16 @@ pub const Agent = struct {
         return stream.remote_candidate_count(component_id);
     }
 
+    pub fn find_local_candidate_by_id(self: *Agent, stream_id: u32, candidate_id: u64) !candidate.Candidate {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.find_local_candidate_by_id(candidate_id) orelse error.NotFound;
+    }
+
+    pub fn find_remote_candidate_by_id(self: *Agent, stream_id: u32, candidate_id: u64) !candidate.Candidate {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+        return stream.find_remote_candidate_by_id(candidate_id) orelse error.NotFound;
+    }
+
     pub fn add_remote_candidates(self: *Agent, stream_id: u32, values: []const candidate.Candidate) !usize {
         const stream = self.get_stream(stream_id) orelse return error.NotFound;
         var added: usize = 0;
@@ -369,4 +379,36 @@ test "agent signaling roundtrip between local and remote stream" {
     try std.testing.expect(applied.credentials_updated);
     try std.testing.expectEqual(@as(usize, 1), applied.candidates_added);
     try std.testing.expectEqual(@as(usize, 1), try b.remote_candidate_count(sb, 1));
+}
+
+test "agent candidate lookup by id" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 130 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 130 }, .port = 6000 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 101,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 202,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 10, 1),
+        .address = remote_addr,
+    }));
+
+    try std.testing.expectEqual(@as(u64, 101), (try agent.find_local_candidate_by_id(stream_id, 101)).id);
+    try std.testing.expectEqual(@as(u64, 202), (try agent.find_remote_candidate_by_id(stream_id, 202)).id);
+    try std.testing.expectError(error.NotFound, agent.find_remote_candidate_by_id(stream_id, 999));
 }

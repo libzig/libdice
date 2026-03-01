@@ -101,6 +101,14 @@ pub const Stream = struct {
         return self.remote_candidates.count_for_component(component_id);
     }
 
+    pub fn find_local_candidate_by_id(self: *const Stream, candidate_id: u64) ?candidate.Candidate {
+        return self.local_candidates.find_by_id(candidate_id);
+    }
+
+    pub fn find_remote_candidate_by_id(self: *const Stream, candidate_id: u64) ?candidate.Candidate {
+        return self.remote_candidates.find_by_id(candidate_id);
+    }
+
     fn copy_candidates_for_component(
         self: *const Stream,
         allocator: std.mem.Allocator,
@@ -237,4 +245,35 @@ test "stream candidate copy helpers" {
     defer std.testing.allocator.free(comp2);
     try std.testing.expectEqual(@as(usize, 1), comp2.len);
     try std.testing.expectEqual(@as(u16, 2), comp2[0].component_id);
+}
+
+test "stream find candidate by id" {
+    var stream = Stream.init(std.testing.allocator, 8);
+    defer stream.deinit();
+
+    const a1: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 20 }, .port = 7000 } };
+    const a2: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 20 }, .port = 8000 } };
+
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, a1),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = a1,
+    }));
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 20,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, a2),
+        .priority = candidate.compute_candidate_priority(.srflx, 10, 1),
+        .address = a2,
+    }));
+
+    try std.testing.expectEqual(@as(u64, 10), stream.find_local_candidate_by_id(10).?.id);
+    try std.testing.expectEqual(@as(u64, 20), stream.find_remote_candidate_by_id(20).?.id);
+    try std.testing.expectEqual(@as(?candidate.Candidate, null), stream.find_local_candidate_by_id(999));
 }

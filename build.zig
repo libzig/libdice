@@ -137,4 +137,79 @@ pub fn build(b: *std.Build) void {
     const run_smoke_client_b = b.addRunArtifact(smoke_client_b);
     const smoke_client_b_step = b.step("run-smoke-client-b", "Run smoke client example B");
     smoke_client_b_step.dependOn(&run_smoke_client_b.step);
+
+    // ICE pump demo
+    const ice_pump_demo_module = b.createModule(.{
+        .root_source_file = b.path("examples/ice_pump_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ice_pump_demo_module.addImport("libdice", libdice_module);
+
+    const ice_pump_demo = b.addExecutable(.{
+        .name = "ice_pump_demo",
+        .root_module = ice_pump_demo_module,
+    });
+    b.installArtifact(ice_pump_demo);
+
+    const run_ice_pump_demo = b.addRunArtifact(ice_pump_demo);
+    const ice_pump_demo_step = b.step("run-ice-pump-demo", "Run ICE pump demo example");
+    ice_pump_demo_step.dependOn(&run_ice_pump_demo.step);
+
+    // ICE timeout demo
+    const ice_timeout_demo_module = b.createModule(.{
+        .root_source_file = b.path("examples/ice_timeout_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ice_timeout_demo_module.addImport("libdice", libdice_module);
+
+    const ice_timeout_demo = b.addExecutable(.{
+        .name = "ice_timeout_demo",
+        .root_module = ice_timeout_demo_module,
+    });
+    b.installArtifact(ice_timeout_demo);
+
+    const run_ice_timeout_demo = b.addRunArtifact(ice_timeout_demo);
+    const ice_timeout_demo_step = b.step("run-ice-timeout-demo", "Run ICE timeout demo example");
+    ice_timeout_demo_step.dependOn(&run_ice_timeout_demo.step);
+
+    // ICE drive demo
+    const ice_drive_demo_module = b.createModule(.{
+        .root_source_file = b.path("examples/ice_drive_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ice_drive_demo_module.addImport("libdice", libdice_module);
+
+    const ice_drive_demo = b.addExecutable(.{
+        .name = "ice_drive_demo",
+        .root_module = ice_drive_demo_module,
+    });
+    b.installArtifact(ice_drive_demo);
+
+    const run_ice_drive_demo = b.addRunArtifact(ice_drive_demo);
+    const ice_drive_demo_step = b.step("run-ice-drive-demo", "Run ICE drive-loop demo example");
+    ice_drive_demo_step.dependOn(&run_ice_drive_demo.step);
+
+    // ICE demo selector
+    const ice_demo_selector_module = b.createModule(.{
+        .root_source_file = b.path("examples/ice_demo_selector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ice_demo_selector_module.addImport("libdice", libdice_module);
+
+    const ice_demo_selector = b.addExecutable(.{
+        .name = "ice_demo_selector",
+        .root_module = ice_demo_selector_module,
+    });
+    b.installArtifact(ice_demo_selector);
+
+    const run_ice_demo_selector = b.addRunArtifact(ice_demo_selector);
+    if (b.args) |args| {
+        run_ice_demo_selector.addArgs(args);
+    }
+    const ice_demo_selector_step = b.step("run-ice-demo", "Run ICE demo selector (pump|timeout)");
+    ice_demo_selector_step.dependOn(&run_ice_demo_selector.step);
 }

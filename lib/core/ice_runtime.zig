@@ -15,6 +15,16 @@ pub const StartedCheck = struct {
     transaction_id: transaction.TransactionId,
 };
 
+pub const StartedCheckDetailed = struct {
+    stream_id: u32,
+    component_id: u16,
+    transaction_id: transaction.TransactionId,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
+    nominated: bool,
+};
+
 pub const TimedOutCheck = struct {
     stream_id: u32,
     component_id: u16,
@@ -54,6 +64,16 @@ pub const RemoteBatchExpandSummary = struct {
     remote_added: usize,
     new_pairs: usize,
     next_pair_id: u64,
+};
+
+pub const DueRetransmit = struct {
+    stream_id: u32,
+    component_id: u16,
+    transaction_id: transaction.TransactionId,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
+    nominated: bool,
 };
 
 const RuntimeEntry = struct {
@@ -219,13 +239,29 @@ pub const IceRuntime = struct {
     }
 
     pub fn start_next_check_any(self: *IceRuntime, random: std.Random, now_ms: u64) !?StartedCheck {
+        const started = try self.start_next_check_any_detailed(random, now_ms);
+        if (started) |value| {
+            return .{
+                .stream_id = value.stream_id,
+                .component_id = value.component_id,
+                .transaction_id = value.transaction_id,
+            };
+        }
+        return null;
+    }
+
+    pub fn start_next_check_any_detailed(self: *IceRuntime, random: std.Random, now_ms: u64) !?StartedCheckDetailed {
         for (self.entries.items) |*entry| {
-            const started = try entry.runtime.start_next_check_any(random, now_ms);
+            const started = try entry.runtime.start_next_check_any_detailed(random, now_ms);
             if (started) |value| {
                 return .{
                     .stream_id = entry.stream_id,
                     .component_id = value.component_id,
                     .transaction_id = value.transaction_id,
+                    .pair_id = value.pair_id,
+                    .local_candidate_id = value.local_candidate_id,
+                    .remote_candidate_id = value.remote_candidate_id,
+                    .nominated = value.nominated,
                 };
             }
         }
@@ -241,6 +277,44 @@ pub const IceRuntime = struct {
     ) !conncheck.CompletedCheck {
         const entry = self.find_entry(stream_id) orelse return error.NotFound;
         return entry.runtime.on_response(component_id, view, now_ms);
+    }
+
+    pub fn collect_due_retransmits_all(self: *IceRuntime, now_ms: u64, out: []DueRetransmit) !usize {
+        var written: usize = 0;
+        for (self.entries.items) |*entry| {
+            if (written >= out.len) break;
+
+            const room = out.len - written;
+            var local = try self.allocator.alloc(stream_connectivity.DueRetransmitWithComponent, room);
+            defer self.allocator.free(local);
+
+            const count = try entry.runtime.collect_due_retransmits_all(now_ms, local);
+            for (local[0..@min(room, count)]) |item| {
+                out[written] = .{
+                    .stream_id = entry.stream_id,
+                    .component_id = item.component_id,
+                    .transaction_id = item.due.transaction_id,
+                    .pair_id = item.due.pair_id,
+                    .local_candidate_id = item.due.local_candidate_id,
+                    .remote_candidate_id = item.due.remote_candidate_id,
+                    .nominated = item.due.nominated,
+                };
+                written += 1;
+            }
+        }
+
+        return written;
+    }
+
+    pub fn mark_retransmitted(
+        self: *IceRuntime,
+        stream_id: u32,
+        component_id: u16,
+        transaction_id: transaction.TransactionId,
+        now_ms: u64,
+    ) !void {
+        const entry = self.find_entry(stream_id) orelse return error.NotFound;
+        try entry.runtime.mark_retransmitted(component_id, transaction_id, now_ms);
     }
 
     pub fn expire_all(self: *IceRuntime, now_ms: u64, out: []TimedOutCheck) !usize {
@@ -735,4 +809,46 @@ test "ice runtime drains stream events" {
     var events: [64]IceEvent = undefined;
     const count = runtime.drain_events(&events);
     try std.testing.expect(count >= 2);
+}
+
+test "ice runtime collects due retransmits across streams" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 140 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 140 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{ .base_rto_ms = 100, .max_retransmits = 2 }, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 9100);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(38);
+    _ = try runtime.start_next_check_any(prng.random(), 0);
+
+    var due: [2]DueRetransmit = undefined;
+    const count = try runtime.collect_due_retransmits_all(100, &due);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(stream_id, due[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 9100), due[0].pair_id);
 }

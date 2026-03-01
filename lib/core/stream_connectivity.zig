@@ -13,6 +13,15 @@ pub const StartedCheck = struct {
     transaction_id: transaction.TransactionId,
 };
 
+pub const StartedCheckDetailed = struct {
+    component_id: u16,
+    transaction_id: transaction.TransactionId,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
+    nominated: bool,
+};
+
 pub const TimedOutWithComponent = struct {
     component_id: u16,
     timed_out: conncheck.TimedOutCheck,
@@ -33,6 +42,11 @@ pub const StreamConnectivityStats = struct {
 pub const StreamEvent = struct {
     component_id: u16,
     event: connectivity_engine.Event,
+};
+
+pub const DueRetransmitWithComponent = struct {
+    component_id: u16,
+    due: connectivity_engine.DueRetransmit,
 };
 
 pub const StreamConnectivityRuntime = struct {
@@ -196,12 +210,31 @@ pub const StreamConnectivityRuntime = struct {
         random: std.Random,
         now_ms: u64,
     ) !?StartedCheck {
+        const started = try self.start_next_check_any_detailed(random, now_ms);
+        if (started) |value| {
+            return .{
+                .component_id = value.component_id,
+                .transaction_id = value.transaction_id,
+            };
+        }
+        return null;
+    }
+
+    pub fn start_next_check_any_detailed(
+        self: *StreamConnectivityRuntime,
+        random: std.Random,
+        now_ms: u64,
+    ) !?StartedCheckDetailed {
         for (self.engines.items) |*engine| {
-            const maybe_tx = try engine.start_next_check(random, now_ms);
-            if (maybe_tx) |tx_id| {
+            const maybe_started = try engine.start_next_check_detailed(random, now_ms);
+            if (maybe_started) |started| {
                 return .{
                     .component_id = engine.component.id,
-                    .transaction_id = tx_id,
+                    .transaction_id = started.transaction_id,
+                    .pair_id = started.pair_id,
+                    .local_candidate_id = started.context.local_candidate_id,
+                    .remote_candidate_id = started.context.remote_candidate_id,
+                    .nominated = started.context.nominated,
                 };
             }
         }
@@ -217,6 +250,42 @@ pub const StreamConnectivityRuntime = struct {
     ) !conncheck.CompletedCheck {
         const engine = self.get_engine(component_id) orelse return error.NotFound;
         return engine.on_response(view, now_ms);
+    }
+
+    pub fn collect_due_retransmits_all(
+        self: *StreamConnectivityRuntime,
+        now_ms: u64,
+        out: []DueRetransmitWithComponent,
+    ) !usize {
+        var written: usize = 0;
+        for (self.engines.items) |*engine| {
+            if (written >= out.len) break;
+
+            const room = out.len - written;
+            var local = try self.allocator.alloc(connectivity_engine.DueRetransmit, room);
+            defer self.allocator.free(local);
+
+            const count = try engine.collect_due_retransmits_detailed(now_ms, local);
+            for (local[0..@min(room, count)]) |item| {
+                out[written] = .{
+                    .component_id = engine.component.id,
+                    .due = item,
+                };
+                written += 1;
+            }
+        }
+
+        return written;
+    }
+
+    pub fn mark_retransmitted(
+        self: *StreamConnectivityRuntime,
+        component_id: u16,
+        transaction_id: transaction.TransactionId,
+        now_ms: u64,
+    ) !void {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        try engine.mark_retransmitted(transaction_id, now_ms);
     }
 
     pub fn component_state(self: *StreamConnectivityRuntime, component_id: u16) !component.ComponentState {
@@ -462,4 +531,29 @@ test "stream connectivity runtime drains component events" {
     var events: [16]StreamEvent = undefined;
     const count = runtime.drain_events(&events);
     try std.testing.expect(count >= 2);
+}
+
+test "stream connectivity runtime collects due retransmits" {
+    const component_ids = [_]u16{1};
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 62, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 2 }, .{}, .regular);
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 910,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(37);
+    _ = try runtime.start_next_check_for_component(1, prng.random(), 0);
+
+    var due: [2]DueRetransmitWithComponent = undefined;
+    const count = try runtime.collect_due_retransmits_all(100, &due);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(u16, 1), due[0].component_id);
+    try std.testing.expectEqual(@as(u64, 910), due[0].due.pair_id);
 }

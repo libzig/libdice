@@ -141,6 +141,13 @@ pub const CandidateList = struct {
         }
         return result_count;
     }
+
+    pub fn find_by_id(self: *const CandidateList, candidate_id: u64) ?Candidate {
+        for (self.items.items) |item| {
+            if (item.id == candidate_id) return item;
+        }
+        return null;
+    }
 };
 
 test "candidate priority ordering by type preference" {
@@ -207,4 +214,25 @@ test "candidate list clear retains allocation and empties items" {
 
     list.clear();
     try std.testing.expectEqual(@as(usize, 0), list.count());
+}
+
+test "candidate list find by id" {
+    var list = CandidateList.init(std.testing.allocator);
+    defer list.deinit();
+
+    const address: Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 20 }, .port = 3478 } };
+    const item = Candidate{
+        .id = 42,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = compute_foundation(.udp, .host, address),
+        .priority = compute_candidate_priority(.host, 1, 1),
+        .address = address,
+    };
+
+    try std.testing.expect(try list.add(item));
+    const found = list.find_by_id(42).?;
+    try std.testing.expectEqual(@as(u64, 42), found.id);
+    try std.testing.expectEqual(@as(?Candidate, null), list.find_by_id(99));
 }

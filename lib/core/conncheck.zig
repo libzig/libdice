@@ -79,6 +79,11 @@ pub const ConnectivityCheckTracker = struct {
         return self.tx_store.collect_due_retransmits(now_ms, out);
     }
 
+    pub fn peek_meta(self: *const ConnectivityCheckTracker, transaction_id: transaction.TransactionId) ?CheckMeta {
+        const ctx = self.contexts.get(transaction_id) orelse return null;
+        return ctx.meta;
+    }
+
     pub fn mark_retransmitted(self: *ConnectivityCheckTracker, transaction_id: transaction.TransactionId, now_ms: u64) error{ NotFound, RetryLimitReached }!void {
         try self.tx_store.mark_retransmitted(transaction_id, now_ms);
     }

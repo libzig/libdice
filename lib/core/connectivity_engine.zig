@@ -14,6 +14,12 @@ pub const PairContext = struct {
     nominated: bool,
 };
 
+pub const StartedCheck = struct {
+    transaction_id: transaction.TransactionId,
+    pair_id: u64,
+    context: PairContext,
+};
+
 pub const Event = union(enum) {
     state_changed: struct {
         from: component_mod.ComponentState,
@@ -55,6 +61,14 @@ pub const ConnectivityEngineStats = struct {
     pending_transactions: usize,
     consent_state: consent_mod.ConsentState,
     consent_missed_probes: u8,
+};
+
+pub const DueRetransmit = struct {
+    transaction_id: transaction.TransactionId,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
+    nominated: bool,
 };
 
 pub const ComponentConnectivityEngine = struct {
@@ -147,6 +161,12 @@ pub const ComponentConnectivityEngine = struct {
     }
 
     pub fn start_next_check(self: *ComponentConnectivityEngine, random: std.Random, now_ms: u64) !?transaction.TransactionId {
+        const started = try self.start_next_check_detailed(random, now_ms);
+        if (started) |value| return value.transaction_id;
+        return null;
+    }
+
+    pub fn start_next_check_detailed(self: *ComponentConnectivityEngine, random: std.Random, now_ms: u64) !?StartedCheck {
         var pair = self.checklist.pop_next_triggered();
         if (pair == null) pair = self.checklist.pop_next_ordinary();
         if (pair == null) return null;
@@ -167,11 +187,41 @@ pub const ComponentConnectivityEngine = struct {
             .at_ms = now_ms,
         } });
 
-        return tx_id;
+        return .{
+            .transaction_id = tx_id,
+            .pair_id = pair.?.id,
+            .context = ctx,
+        };
     }
 
     pub fn collect_due_retransmits(self: *ComponentConnectivityEngine, now_ms: u64, out: []transaction.TransactionId) usize {
         return self.tracker.collect_due_retransmits(now_ms, out);
+    }
+
+    pub fn collect_due_retransmits_detailed(self: *ComponentConnectivityEngine, now_ms: u64, out: []DueRetransmit) !usize {
+        if (out.len == 0) return 0;
+
+        var tx_ids = try self.allocator.alloc(transaction.TransactionId, out.len);
+        defer self.allocator.free(tx_ids);
+
+        const due = self.tracker.collect_due_retransmits(now_ms, tx_ids);
+        var written: usize = 0;
+        for (tx_ids[0..due]) |tx_id| {
+            const meta = self.tracker.peek_meta(tx_id) orelse continue;
+            const ctx = self.pair_contexts.get(meta.candidate_pair_id) orelse continue;
+            if (written < out.len) {
+                out[written] = .{
+                    .transaction_id = tx_id,
+                    .pair_id = meta.candidate_pair_id,
+                    .local_candidate_id = ctx.local_candidate_id,
+                    .remote_candidate_id = ctx.remote_candidate_id,
+                    .nominated = ctx.nominated,
+                };
+            }
+            written += 1;
+        }
+
+        return written;
     }
 
     pub fn mark_retransmitted(self: *ComponentConnectivityEngine, transaction_id: transaction.TransactionId, now_ms: u64) !void {
@@ -597,4 +647,28 @@ test "connectivity engine emits events" {
     }
     try std.testing.expect(saw_started);
     try std.testing.expect(saw_succeeded);
+}
+
+test "connectivity engine collects due retransmits with candidate context" {
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 10, 1, .{ .base_rto_ms = 100, .max_retransmits = 2 }, .{}, .regular);
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 1000,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 10, .remote_candidate_id = 20, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(36);
+    _ = try engine.start_next_check(prng.random(), 0);
+
+    var due: [2]DueRetransmit = undefined;
+    const count = try engine.collect_due_retransmits_detailed(100, &due);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(u64, 1000), due[0].pair_id);
+    try std.testing.expectEqual(@as(u64, 20), due[0].remote_candidate_id);
 }
