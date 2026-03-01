@@ -13,6 +13,12 @@ pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
 pub const checklist_compute_pair_priority = @import("core/checklist.zig").compute_pair_priority;
+pub const Agent = @import("core/agent.zig").Agent;
+pub const Stream = @import("core/stream.zig").Stream;
+pub const Credentials = @import("core/stream.zig").Credentials;
+pub const Component = @import("core/component.zig").Component;
+pub const ComponentState = @import("core/component.zig").ComponentState;
+pub const SelectedPair = @import("core/component.zig").SelectedPair;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunMessageClass = @import("protocol/stun/message.zig").MessageClass;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
@@ -143,6 +149,21 @@ test "checklist exports are reachable" {
 
     const next: *ChecklistPair = checklist.pop_next_ordinary().?;
     try std.testing.expectEqual(ChecklistPairState.in_progress, next.state);
+}
+
+test "agent stream component exports are reachable" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(2);
+    const stream: *Stream = agent.get_stream(stream_id).?;
+    try std.testing.expectEqual(@as(usize, 2), stream.component_count());
+
+    const component: *Component = agent.get_component(stream_id, 1).?;
+    try component.start_gathering();
+    try component.start_connecting();
+    try component.on_check_succeeded(1, 10, 20, true);
+    try std.testing.expectEqual(ComponentState.ready, component.state);
 }
 
 test "stun header export is reachable" {
