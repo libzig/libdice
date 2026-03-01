@@ -9,6 +9,8 @@ pub const ConnectivityCheckTracker = @import("core/conncheck.zig").ConnectivityC
 pub const ConnectivityCheckMeta = @import("core/conncheck.zig").CheckMeta;
 pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCheck;
 pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
+pub const ComponentConnectivityEngine = @import("core/connectivity_engine.zig").ComponentConnectivityEngine;
+pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairContext;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -141,6 +143,32 @@ test "connectivity check tracker export is reachable" {
     const view = try parse_stun_message(&packet);
     const completed: CompletedConnectivityCheck = try tracker.on_response(view, 10);
     try std.testing.expectEqual(@as(u64, 1), completed.user_tag);
+}
+
+test "component connectivity engine export is reachable" {
+    var engine = ComponentConnectivityEngine.init(std.testing.allocator, 1, 1, StunRetryPolicy{});
+    defer engine.deinit();
+
+    try engine.start_connecting();
+    try engine.add_pair(.{
+        .id = 1,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 100,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 10, .remote_candidate_id = 20, .nominated = true });
+
+    var prng = std.Random.DefaultPrng.init(5);
+    const tx_id = (try engine.start_next_check(prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = StunHeader.init(0x0101, 0, tx_id);
+    _ = try header.encode(&packet);
+
+    const view = try parse_stun_message(&packet);
+    const completed = try engine.on_response(view, 10);
+    try std.testing.expectEqual(@as(u64, 1), completed.meta.candidate_pair_id);
 }
 
 test "checklist exports are reachable" {

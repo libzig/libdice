@@ -113,6 +113,24 @@ pub const Checklist = struct {
         const pair = self.get_pair(pair_id) orelse return error.NotFound;
         pair.state = .failed;
     }
+
+    pub fn count_state(self: Checklist, target: PairState) usize {
+        var result_count: usize = 0;
+        for (self.pairs.items) |pair| {
+            if (pair.state == target) result_count += 1;
+        }
+        return result_count;
+    }
+
+    pub fn has_pending_or_in_progress(self: Checklist) bool {
+        for (self.pairs.items) |pair| {
+            switch (pair.state) {
+                .frozen, .waiting, .in_progress => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
 };
 
 pub fn compute_pair_priority(controlling: bool, local_priority: u32, remote_priority: u32) u64 {
@@ -215,4 +233,33 @@ test "state transitions to succeeded and failed" {
     pair.state = .in_progress;
     try checklist.mark_failed(1);
     try std.testing.expectEqual(PairState.failed, pair.state);
+}
+
+test "checklist state counters and pending check detection" {
+    var checklist = Checklist.init(std.testing.allocator);
+    defer checklist.deinit();
+
+    try checklist.add_pair(.{
+        .id = 1,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    });
+    try checklist.add_pair(.{
+        .id = 2,
+        .local_candidate_id = 3,
+        .remote_candidate_id = 4,
+        .priority = 9,
+        .component_id = 1,
+        .state = .failed,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), checklist.count_state(.waiting));
+    try std.testing.expectEqual(@as(usize, 1), checklist.count_state(.failed));
+    try std.testing.expect(checklist.has_pending_or_in_progress());
+
+    try checklist.mark_failed(1);
+    try std.testing.expect(!checklist.has_pending_or_in_progress());
 }
