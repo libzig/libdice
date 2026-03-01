@@ -119,6 +119,10 @@ pub const hmac_sha1_compute = @import("crypto/hmac_sha1.zig").compute;
 pub const hmac_sha1_verify = @import("crypto/hmac_sha1.zig").verify;
 pub const Md5Digest = @import("crypto/md5.zig").Digest;
 pub const md5_digest = @import("crypto/md5.zig").digest;
+pub const net_to_std_address = @import("net/address.zig").to_std;
+pub const net_from_std_address = @import("net/address.zig").from_std;
+pub const net_parse_ip_port = @import("net/address.zig").parse_ip_port;
+pub const UdpSocket = @import("net/udp_socket.zig").UdpSocket;
 
 pub const version = "0.0.1";
 
@@ -579,6 +583,13 @@ test "stun turn usage exports are reachable" {
     });
     const perm_view = try parse_stun_message(perm_bytes);
     try std.testing.expectEqual(@as(usize, 1), try stun_turn_count_xor_peer_addresses(perm_view));
+}
+
+test "net exports are reachable" {
+    const addr = try net_parse_ip_port("127.0.0.1:9999");
+    const std_addr = net_to_std_address(addr);
+    const roundtrip = try net_from_std_address(std_addr);
+    try std.testing.expect(CandidateAddress.eql(addr, roundtrip));
 }
 
 test "turn channel data exports are reachable" {
