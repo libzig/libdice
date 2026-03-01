@@ -13,6 +13,11 @@ pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
+pub const HmacSha1Mac = @import("crypto/hmac_sha1.zig").Mac;
+pub const hmac_sha1_compute = @import("crypto/hmac_sha1.zig").compute;
+pub const hmac_sha1_verify = @import("crypto/hmac_sha1.zig").verify;
+pub const Md5Digest = @import("crypto/md5.zig").Digest;
+pub const md5_digest = @import("crypto/md5.zig").digest;
 
 pub const version = "0.0.1";
 
@@ -84,4 +89,12 @@ test "stun transaction exports are reachable" {
 
     const tx = stun_tx_from_rng(random);
     try std.testing.expect(stun_tx_equals(tx, tx));
+}
+
+test "crypto exports are reachable" {
+    const mac = hmac_sha1_compute("key", "message");
+    try std.testing.expect(hmac_sha1_verify(mac, "key", "message"));
+
+    const digest = md5_digest("message");
+    try std.testing.expectEqual(@as(usize, 16), digest.len);
 }
