@@ -52,6 +52,7 @@ pub const apply_remote_description = @import("core/signaling.zig").apply_remote_
 pub const Candidate = @import("core/candidate.zig").Candidate;
 pub const CandidateType = @import("core/candidate.zig").CandidateType;
 pub const CandidateTransport = @import("core/candidate.zig").Transport;
+pub const CandidateTcpRole = @import("core/candidate.zig").TcpRole;
 pub const CandidateAddress = @import("core/candidate.zig").Address;
 pub const CandidateList = @import("core/candidate.zig").CandidateList;
 pub const candidate_compute_priority = @import("core/candidate.zig").compute_candidate_priority;

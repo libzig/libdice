@@ -45,6 +45,7 @@ pub fn populate_stream_checklists_with_policy(
                 if (remote.component_id != component.id) continue;
                 if (local.transport != remote.transport) continue;
                 if (policy == .force_relay and local.candidate_type != .relay and remote.candidate_type != .relay) continue;
+                if (local.transport == .tcp and !stream_mod.candidate.tcp_roles_compatible(local.tcp_role, remote.tcp_role)) continue;
 
                 generated += 1;
 
@@ -256,4 +257,66 @@ test "pair builder force_relay policy filters non-relay pairs" {
     try std.testing.expectEqual(@as(usize, 3), summary.generated);
     try std.testing.expectEqual(@as(usize, 3), summary.added);
     try std.testing.expectEqual(@as(usize, 3), runtime.get_engine(1).?.checklist.pair_count());
+}
+
+test "pair builder filters incompatible tcp role pairs" {
+    var stream = stream_mod.Stream.init(std.testing.allocator, 4);
+    defer stream.deinit();
+    try stream.add_component(1);
+
+    const component_ids = [_]u16{1};
+    var runtime = try stream_connectivity.StreamConnectivityRuntime.init(std.testing.allocator, 4, &component_ids, .{}, .{}, .regular);
+    defer runtime.deinit();
+
+    const local_a: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 40 }, .port = 5000 } };
+    const local_p: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 41 }, .port = 5001 } };
+    const remote_a: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 40 }, .port = 6000 } };
+    const remote_p: stream_mod.candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 41 }, .port = 6001 } };
+
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = stream_mod.candidate.compute_foundation(.tcp, .host, local_a),
+        .priority = stream_mod.candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_a,
+        .tcp_role = .active,
+    }));
+    try std.testing.expect(try stream.add_local_candidate(.{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = stream_mod.candidate.compute_foundation(.tcp, .host, local_p),
+        .priority = stream_mod.candidate.compute_candidate_priority(.host, 101, 1),
+        .address = local_p,
+        .tcp_role = .passive,
+    }));
+
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 10,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = stream_mod.candidate.compute_foundation(.tcp, .host, remote_a),
+        .priority = stream_mod.candidate.compute_candidate_priority(.host, 90, 1),
+        .address = remote_a,
+        .tcp_role = .active,
+    }));
+    try std.testing.expect(try stream.add_remote_candidate(.{
+        .id = 11,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = stream_mod.candidate.compute_foundation(.tcp, .host, remote_p),
+        .priority = stream_mod.candidate.compute_candidate_priority(.host, 91, 1),
+        .address = remote_p,
+        .tcp_role = .passive,
+    }));
+
+    const summary = try populate_stream_checklists_with_policy(&stream, &runtime, true, 200, .all);
+    try std.testing.expectEqual(@as(usize, 2), summary.generated);
+    try std.testing.expectEqual(@as(usize, 2), summary.added);
+    try std.testing.expectEqual(@as(usize, 2), runtime.get_engine(1).?.checklist.pair_count());
 }

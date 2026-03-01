@@ -12,6 +12,12 @@ pub const Transport = enum {
     tcp,
 };
 
+pub const TcpRole = enum {
+    active,
+    passive,
+    sim_open,
+};
+
 pub const Address = union(enum) {
     ipv4: struct {
         ip: [4]u8,
@@ -45,14 +51,28 @@ pub const Candidate = struct {
     priority: u32,
     address: Address,
     base_address: ?Address = null,
+    tcp_role: ?TcpRole = null,
 
     pub fn semantically_equal(a: Candidate, b: Candidate) bool {
         return a.component_id == b.component_id and
             a.candidate_type == b.candidate_type and
             a.transport == b.transport and
+            a.tcp_role == b.tcp_role and
             Address.eql(a.address, b.address);
     }
 };
+
+pub fn tcp_roles_compatible(local_role: ?TcpRole, remote_role: ?TcpRole) bool {
+    if (local_role == null or remote_role == null) return true;
+
+    const l = local_role.?;
+    const r = remote_role.?;
+    return switch (l) {
+        .active => r == .passive or r == .sim_open,
+        .passive => r == .active or r == .sim_open,
+        .sim_open => r == .active or r == .passive or r == .sim_open,
+    };
+}
 
 pub fn type_preference(candidate_type: CandidateType) u8 {
     return switch (candidate_type) {
@@ -235,4 +255,39 @@ test "candidate list find by id" {
     const found = list.find_by_id(42).?;
     try std.testing.expectEqual(@as(u64, 42), found.id);
     try std.testing.expectEqual(@as(?Candidate, null), list.find_by_id(99));
+}
+
+test "tcp role compatibility matrix" {
+    try std.testing.expect(tcp_roles_compatible(.active, .passive));
+    try std.testing.expect(tcp_roles_compatible(.passive, .active));
+    try std.testing.expect(tcp_roles_compatible(.sim_open, .sim_open));
+    try std.testing.expect(tcp_roles_compatible(.active, .sim_open));
+    try std.testing.expect(!tcp_roles_compatible(.active, .active));
+    try std.testing.expect(!tcp_roles_compatible(.passive, .passive));
+}
+
+test "candidate semantic equality includes tcp role" {
+    const address: Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 31 }, .port = 9000 } };
+    const a = Candidate{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = compute_foundation(.tcp, .host, address),
+        .priority = compute_candidate_priority(.host, 1, 1),
+        .address = address,
+        .tcp_role = .active,
+    };
+    const b = Candidate{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = a.foundation,
+        .priority = a.priority,
+        .address = address,
+        .tcp_role = .passive,
+    };
+
+    try std.testing.expect(!Candidate.semantically_equal(a, b));
 }
