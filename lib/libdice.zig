@@ -16,6 +16,9 @@ pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCh
 pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
 pub const PairBuildSummary = @import("core/pair_builder.zig").PairBuildSummary;
 pub const populate_stream_checklists = @import("core/pair_builder.zig").populate_stream_checklists;
+pub const IceRuntime = @import("core/ice_runtime.zig").IceRuntime;
+pub const IceRuntimeStartedCheck = @import("core/ice_runtime.zig").StartedCheck;
+pub const IceRuntimeTimedOutCheck = @import("core/ice_runtime.zig").TimedOutCheck;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -234,6 +237,48 @@ test "pair builder exports are reachable" {
     const summary: PairBuildSummary = try populate_stream_checklists(&stream, &runtime, true, 9000);
     try std.testing.expectEqual(@as(usize, 1), summary.generated);
     try std.testing.expectEqual(@as(usize, 1), summary.added);
+}
+
+test "ice runtime exports are reachable" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 80 }, .port = 5000 } };
+    const remote_addr: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 80 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .host, local_addr),
+        .priority = candidate_compute_priority(.host, 10, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate_compute_priority(.srflx, 10, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, StunRetryPolicy{});
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 10000);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const started: IceRuntimeStartedCheck = (try runtime.start_next_check_any(prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = StunHeader.init(0x0101, 0, started.transaction_id);
+    _ = try header.encode(&packet);
+    const view = try parse_stun_message(&packet);
+    _ = try runtime.on_response(started.stream_id, started.component_id, view, 10);
 }
 
 test "checklist exports are reachable" {
