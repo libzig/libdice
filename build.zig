@@ -4,24 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create the libfast module
-    const libfast_module = b.createModule(.{
-        .root_source_file = b.path("lib/libfast.zig"),
+    // Create the libdice module
+    const libdice_module = b.createModule(.{
+        .root_source_file = b.path("lib/libdice.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     // Export the module so it can be used by other projects
-    _ = b.addModule("libfast", .{
-        .root_source_file = b.path("lib/libfast.zig"),
+    _ = b.addModule("libdice", .{
+        .root_source_file = b.path("lib/libdice.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     // Build the library
     const lib = b.addLibrary(.{
-        .name = "fast",
-        .root_module = libfast_module,
+        .name = "dice",
+        .root_module = libdice_module,
         .linkage = .static,
     });
 
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests
     const lib_unit_tests = b.addTest(.{
-        .root_module = libfast_module,
+        .root_module = libdice_module,
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -37,93 +37,93 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
 
-    // Dual-mode regression subset
+    // Bootstrap regression subset
     const dual_mode_module = b.createModule(.{
         .root_source_file = b.path("lib/dual_mode_regression_test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    dual_mode_module.addImport("libfast", libfast_module);
+    dual_mode_module.addImport("libdice", libdice_module);
 
     const dual_mode_tests = b.addTest(.{
         .root_module = dual_mode_module,
     });
     const run_dual_mode_tests = b.addRunArtifact(dual_mode_tests);
 
-    const dual_mode_step = b.step("test-dual-mode-regression", "Run paired TLS/SSH regression tests");
+    const dual_mode_step = b.step("test-dual-mode-regression", "Run bootstrap regression tests");
     dual_mode_step.dependOn(&run_dual_mode_tests.step);
 
     // Examples
 
-    // SSH echo server
-    const ssh_server_module = b.createModule(.{
-        .root_source_file = b.path("examples/ssh_echo_server.zig"),
+    // Smoke server A
+    const smoke_server_a_module = b.createModule(.{
+        .root_source_file = b.path("examples/smoke_server_a.zig"),
         .target = target,
         .optimize = optimize,
     });
-    ssh_server_module.addImport("libfast", libfast_module);
+    smoke_server_a_module.addImport("libdice", libdice_module);
 
-    const ssh_server = b.addExecutable(.{
-        .name = "ssh_echo_server",
-        .root_module = ssh_server_module,
+    const smoke_server_a = b.addExecutable(.{
+        .name = "smoke_server_a",
+        .root_module = smoke_server_a_module,
     });
-    b.installArtifact(ssh_server);
+    b.installArtifact(smoke_server_a);
 
-    const run_ssh_server = b.addRunArtifact(ssh_server);
-    const ssh_server_step = b.step("run-ssh-server", "Run SSH/QUIC echo server example");
-    ssh_server_step.dependOn(&run_ssh_server.step);
+    const run_smoke_server_a = b.addRunArtifact(smoke_server_a);
+    const smoke_server_a_step = b.step("run-smoke-server-a", "Run smoke server example A");
+    smoke_server_a_step.dependOn(&run_smoke_server_a.step);
 
-    // SSH echo client
-    const ssh_client_module = b.createModule(.{
-        .root_source_file = b.path("examples/ssh_echo_client.zig"),
+    // Smoke client A
+    const smoke_client_a_module = b.createModule(.{
+        .root_source_file = b.path("examples/smoke_client_a.zig"),
         .target = target,
         .optimize = optimize,
     });
-    ssh_client_module.addImport("libfast", libfast_module);
+    smoke_client_a_module.addImport("libdice", libdice_module);
 
-    const ssh_client = b.addExecutable(.{
-        .name = "ssh_echo_client",
-        .root_module = ssh_client_module,
+    const smoke_client_a = b.addExecutable(.{
+        .name = "smoke_client_a",
+        .root_module = smoke_client_a_module,
     });
-    b.installArtifact(ssh_client);
+    b.installArtifact(smoke_client_a);
 
-    const run_ssh_client = b.addRunArtifact(ssh_client);
-    const ssh_client_step = b.step("run-ssh-client", "Run SSH/QUIC echo client example");
-    ssh_client_step.dependOn(&run_ssh_client.step);
+    const run_smoke_client_a = b.addRunArtifact(smoke_client_a);
+    const smoke_client_a_step = b.step("run-smoke-client-a", "Run smoke client example A");
+    smoke_client_a_step.dependOn(&run_smoke_client_a.step);
 
-    // TLS echo server
-    const tls_server_module = b.createModule(.{
-        .root_source_file = b.path("examples/tls_echo_server.zig"),
+    // Smoke server B
+    const smoke_server_b_module = b.createModule(.{
+        .root_source_file = b.path("examples/smoke_server_b.zig"),
         .target = target,
         .optimize = optimize,
     });
-    tls_server_module.addImport("libfast", libfast_module);
+    smoke_server_b_module.addImport("libdice", libdice_module);
 
-    const tls_server = b.addExecutable(.{
-        .name = "tls_echo_server",
-        .root_module = tls_server_module,
+    const smoke_server_b = b.addExecutable(.{
+        .name = "smoke_server_b",
+        .root_module = smoke_server_b_module,
     });
-    b.installArtifact(tls_server);
+    b.installArtifact(smoke_server_b);
 
-    const run_tls_server = b.addRunArtifact(tls_server);
-    const tls_server_step = b.step("run-tls-server", "Run TLS/QUIC echo server example");
-    tls_server_step.dependOn(&run_tls_server.step);
+    const run_smoke_server_b = b.addRunArtifact(smoke_server_b);
+    const smoke_server_b_step = b.step("run-smoke-server-b", "Run smoke server example B");
+    smoke_server_b_step.dependOn(&run_smoke_server_b.step);
 
-    // TLS echo client
-    const tls_client_module = b.createModule(.{
-        .root_source_file = b.path("examples/tls_echo_client.zig"),
+    // Smoke client B
+    const smoke_client_b_module = b.createModule(.{
+        .root_source_file = b.path("examples/smoke_client_b.zig"),
         .target = target,
         .optimize = optimize,
     });
-    tls_client_module.addImport("libfast", libfast_module);
+    smoke_client_b_module.addImport("libdice", libdice_module);
 
-    const tls_client = b.addExecutable(.{
-        .name = "tls_echo_client",
-        .root_module = tls_client_module,
+    const smoke_client_b = b.addExecutable(.{
+        .name = "smoke_client_b",
+        .root_module = smoke_client_b_module,
     });
-    b.installArtifact(tls_client);
+    b.installArtifact(smoke_client_b);
 
-    const run_tls_client = b.addRunArtifact(tls_client);
-    const tls_client_step = b.step("run-tls-client", "Run TLS/QUIC echo client example");
-    tls_client_step.dependOn(&run_tls_client.step);
+    const run_smoke_client_b = b.addRunArtifact(smoke_client_b);
+    const smoke_client_b_step = b.step("run-smoke-client-b", "Run smoke client example B");
+    smoke_client_b_step.dependOn(&run_smoke_client_b.step);
 }

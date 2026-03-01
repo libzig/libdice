@@ -15,7 +15,7 @@ ci:
 	zig build -Doptimize=ReleaseFast
 
 install: build
-	install -Dm644 "./zig-out/lib/libfast.a" "$(HOME)/.local/lib/libfast.a"
+	install -Dm644 "./zig-out/lib/libdice.a" "$(HOME)/.local/lib/libdice.a"
 
 # Release
 # ==================================================================================================
