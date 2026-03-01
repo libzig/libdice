@@ -925,6 +925,10 @@ pub const IceUdpRuntimeBridge = struct {
                         }
                         summary.completed_checks += 1;
                     },
+                    .stun => |view| {
+                        const handled = try binding.socket.on_server_stun(view, now_ms, null);
+                        if (!handled) summary.ignored_packets += 1;
+                    },
                     else => {
                         summary.ignored_packets += 1;
                     },
@@ -2168,4 +2172,60 @@ test "udp bridge io tick reports turn maintenance sends" {
     );
 
     try std.testing.expectEqual(@as(usize, 1), tick.turn_maintenance_sent);
+}
+
+test "udp bridge applies TURN refresh success to allocation lease" {
+    const encoder = @import("../protocol/stun/encoder.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    binding.socket.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 120,
+        .expires_at_ms = 10_000,
+    };
+
+    var prng = std.Random.DefaultPrng.init(49);
+    var packet_buf: [512]u8 = undefined;
+    const maintenance = try bridge.run_turn_maintenance(prng.random(), 9_500, &packet_buf, .{
+        .allocation_refresh_margin_ms = 1_000,
+    });
+    try std.testing.expectEqual(@as(usize, 1), maintenance.allocation_refreshes_sent);
+
+    var recv_from_client: [512]u8 = undefined;
+    const client_pkt = try turn_server.recv_from(&recv_from_client);
+    const refresh_req = try parser.parse_message(recv_from_client[0..client_pkt.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.refresh_request_type), refresh_req.header.message_type);
+
+    var response_buf: [256]u8 = undefined;
+    var builder = try encoder.Builder.init(&response_buf, usage_turn.refresh_success_response_type, refresh_req.header.transaction_id);
+    var lifetime: [4]u8 = undefined;
+    std.mem.writeInt(u32, &lifetime, 300, .big);
+    try builder.add_attr(usage_turn.lifetime_attr_type, &lifetime);
+    const response = try builder.finish();
+    _ = try turn_server.send_to(client_pkt.from, response);
+
+    var recv_buf: [512]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    _ = try bridge.poll_until_idle(9_600, &recv_buf, &completed);
+
+    try std.testing.expect(binding.socket.allocation != null);
+    try std.testing.expectEqual(@as(u32, 300), binding.socket.allocation.?.lifetime_seconds);
+    try std.testing.expectEqual(@as(u64, 309_600), binding.socket.allocation.?.expires_at_ms);
 }

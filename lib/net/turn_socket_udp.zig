@@ -99,6 +99,35 @@ pub const TurnUdpSocket = struct {
         };
     }
 
+    pub fn on_refresh_success(self: *TurnUdpSocket, view: parser.MessageView, now_ms: u64, integrity_key: ?[]const u8) TurnUdpSocketError!void {
+        const info = try usage_turn.parse_refresh_success_response(view, integrity_key);
+        const lifetime_seconds = info.lifetime_seconds orelse if (self.allocation) |lease| lease.lifetime_seconds else 600;
+
+        if (self.allocation) |*lease| {
+            lease.lifetime_seconds = lifetime_seconds;
+            lease.expires_at_ms = now_ms + @as(u64, lifetime_seconds) * 1000;
+        } else {
+            self.allocation = .{
+                .relayed_address = null,
+                .mapped_address = null,
+                .lifetime_seconds = lifetime_seconds,
+                .expires_at_ms = now_ms + @as(u64, lifetime_seconds) * 1000,
+            };
+        }
+    }
+
+    pub fn on_server_stun(self: *TurnUdpSocket, view: parser.MessageView, now_ms: u64, integrity_key: ?[]const u8) TurnUdpSocketError!bool {
+        if (usage_turn.is_allocate_success_response(view)) {
+            try self.on_allocate_success(view, now_ms, integrity_key);
+            return true;
+        }
+        if (usage_turn.is_refresh_success_response(view)) {
+            try self.on_refresh_success(view, now_ms, integrity_key);
+            return true;
+        }
+        return false;
+    }
+
     pub fn send_refresh_request(self: *TurnUdpSocket, packet_buf: []u8, transaction_id: [12]u8, lifetime_seconds: ?u32, nonce: ?[]const u8, realm: ?[]const u8, username: ?[]const u8) !usize {
         const packet = try usage_turn.build_refresh_request(packet_buf, transaction_id, lifetime_seconds, nonce, realm, username);
         return self.socket.send_to(self.server, packet);
@@ -334,6 +363,36 @@ test "turn udp socket updates allocation lease from allocate success" {
     try std.testing.expect(turn.allocation != null);
     try std.testing.expectEqual(@as(u64, 121_000), turn.allocation.?.expires_at_ms);
     try std.testing.expectEqual(@as(u64, 120_000), turn.allocation.?.refresh_due_at_ms(1_000));
+}
+
+test "turn udp socket refresh success updates allocation lease expiry" {
+    var turn = try TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+    defer turn.deinit();
+
+    turn.allocation = .{
+        .relayed_address = null,
+        .mapped_address = null,
+        .lifetime_seconds = 120,
+        .expires_at_ms = 121_000,
+    };
+
+    const tx_id = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2 };
+    var packet: [128]u8 = undefined;
+    var builder = try @import("../protocol/stun/encoder.zig").Builder.init(&packet, usage_turn.refresh_success_response_type, tx_id);
+    var lifetime: [4]u8 = undefined;
+    std.mem.writeInt(u32, &lifetime, 300, .big);
+    try builder.add_attr(usage_turn.lifetime_attr_type, &lifetime);
+    const bytes = try builder.finish();
+
+    const view = try parser.parse_message(bytes);
+    try turn.on_refresh_success(view, 2_000, null);
+    try std.testing.expect(turn.allocation != null);
+    try std.testing.expectEqual(@as(u32, 300), turn.allocation.?.lifetime_seconds);
+    try std.testing.expectEqual(@as(u64, 302_000), turn.allocation.?.expires_at_ms);
 }
 
 test "turn udp socket sends and decodes channel data" {
