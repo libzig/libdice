@@ -1,6 +1,13 @@
 const std = @import("std");
 const stream_mod = @import("stream.zig");
 const candidate = @import("candidate.zig");
+const discovery = @import("discovery.zig");
+
+pub const GatherSummary = struct {
+    generated: usize,
+    added: usize,
+    next_candidate_id: u64,
+};
 
 pub const Agent = struct {
     allocator: std.mem.Allocator,
@@ -89,6 +96,42 @@ pub const Agent = struct {
         const stream = self.get_stream(stream_id) orelse return error.NotFound;
         return stream.remote_candidate_count(component_id);
     }
+
+    pub fn gather_host_candidates(
+        self: *Agent,
+        stream_id: u32,
+        interfaces: []const discovery.InterfaceAddress,
+        component_ids: []const u16,
+        next_candidate_id_start: u64,
+        include_ipv6: bool,
+    ) !GatherSummary {
+        const stream = self.get_stream(stream_id) orelse return error.NotFound;
+
+        for (component_ids) |component_id| {
+            if (stream.get_component(component_id) == null) return error.InvalidComponent;
+        }
+
+        const gathered = try discovery.gather_host_candidates(
+            self.allocator,
+            stream_id,
+            interfaces,
+            component_ids,
+            next_candidate_id_start,
+            include_ipv6,
+        );
+        defer gathered.deinit(self.allocator);
+
+        var added: usize = 0;
+        for (gathered.candidates) |item| {
+            if (try stream.add_local_candidate(item)) added += 1;
+        }
+
+        return .{
+            .generated = gathered.candidates.len,
+            .added = added,
+            .next_candidate_id = gathered.next_candidate_id,
+        };
+    }
 };
 
 test "agent manages stream lifecycle" {
@@ -151,4 +194,28 @@ test "agent candidate routing to stream" {
     try std.testing.expectEqual(@as(usize, 1), try agent.local_candidate_count(stream_id, 1));
     try std.testing.expectEqual(@as(usize, 1), try agent.remote_candidate_count(stream_id, 1));
     try std.testing.expectError(error.NotFound, agent.local_candidate_count(999, 1));
+}
+
+test "agent host candidate gathering and dedupe" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(2);
+    const interfaces = [_]discovery.InterfaceAddress{
+        .{ .address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 30 }, .port = 5000 } }, .local_preference = 10 },
+        .{ .address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 31 }, .port = 5001 } }, .local_preference = 11 },
+    };
+    const component_ids = [_]u16{ 1, 2 };
+
+    const first = try agent.gather_host_candidates(stream_id, &interfaces, &component_ids, 100, true);
+    try std.testing.expectEqual(@as(usize, 4), first.generated);
+    try std.testing.expectEqual(@as(usize, 4), first.added);
+    try std.testing.expectEqual(@as(u64, 104), first.next_candidate_id);
+
+    const second = try agent.gather_host_candidates(stream_id, &interfaces, &component_ids, first.next_candidate_id, true);
+    try std.testing.expectEqual(@as(usize, 4), second.generated);
+    try std.testing.expectEqual(@as(usize, 0), second.added);
+
+    try std.testing.expectEqual(@as(usize, 2), try agent.local_candidate_count(stream_id, 1));
+    try std.testing.expectEqual(@as(usize, 2), try agent.local_candidate_count(stream_id, 2));
 }

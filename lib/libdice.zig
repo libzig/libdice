@@ -23,6 +23,9 @@ pub const CandidateAddress = @import("core/candidate.zig").Address;
 pub const CandidateList = @import("core/candidate.zig").CandidateList;
 pub const candidate_compute_priority = @import("core/candidate.zig").compute_candidate_priority;
 pub const candidate_compute_foundation = @import("core/candidate.zig").compute_foundation;
+pub const DiscoveryInterfaceAddress = @import("core/discovery.zig").InterfaceAddress;
+pub const gather_host_candidates = @import("core/discovery.zig").gather_host_candidates;
+pub const AgentGatherSummary = @import("core/agent.zig").GatherSummary;
 pub const Component = @import("core/component.zig").Component;
 pub const ComponentState = @import("core/component.zig").ComponentState;
 pub const SelectedPair = @import("core/component.zig").SelectedPair;
@@ -185,6 +188,13 @@ test "agent stream component exports are reachable" {
 
     try std.testing.expect(try agent.add_local_candidate(stream_id, local));
     try std.testing.expectEqual(@as(usize, 1), try agent.local_candidate_count(stream_id, 1));
+
+    const interfaces = [_]DiscoveryInterfaceAddress{
+        .{ .address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 10 }, .port = 9000 } }, .local_preference = 5 },
+    };
+    const components = [_]u16{1};
+    const gathered: AgentGatherSummary = try agent.gather_host_candidates(stream_id, &interfaces, &components, 1000, true);
+    try std.testing.expectEqual(@as(usize, 1), gathered.generated);
 }
 
 test "stun header export is reachable" {
