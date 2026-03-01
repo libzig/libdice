@@ -1765,3 +1765,81 @@ test "udp bridge routes relay local candidate checks through TURN send indicatio
     const inner = try parser.parse_message(inner_payload);
     try std.testing.expect(usage_ice.is_connectivity_check_request(inner));
 }
+
+test "udp bridge completes relay connectivity check from TURN data indication" {
+    const encoder = @import("../protocol/stun/encoder.zig");
+    const address_attrs = @import("../protocol/stun/address_attrs.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const relay_local: candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 3 }, .port = 60001 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 45 }, .port = 5001 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 401,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, relay_local),
+        .priority = candidate.compute_candidate_priority(.relay, 50, 1),
+        .address = relay_local,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 402,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 100, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 13_000);
+    try runtime.start_connecting_all();
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    var prng = std.Random.DefaultPrng.init(46);
+    var out_packet: [512]u8 = undefined;
+    _ = (try bridge.start_and_send_next_check(prng.random(), 0, &out_packet, .{
+        .username = "l:r",
+        .priority = 555,
+        .role = .{ .role = .controlling, .tie_breaker = 99 },
+    })).?;
+
+    var recv_buf_server: [512]u8 = undefined;
+    const received = try turn_server.recv_from(&recv_buf_server);
+    const send_ind = try parser.parse_message(recv_buf_server[0..received.bytes]);
+    const inner_req = try parser.parse_message((try usage_turn.read_data_attr(send_ind)).?);
+
+    var success_buf: [256]u8 = undefined;
+    const success = try usage_ice.build_connectivity_check_success_response(&success_buf, inner_req.header.transaction_id, .{});
+
+    var indication_buf: [512]u8 = undefined;
+    const indication_tx = [_]u8{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 };
+    var builder = try encoder.Builder.init(&indication_buf, usage_turn.data_indication_type, indication_tx);
+    try address_attrs.add_xor_peer_address(&builder, .{ .ipv4 = .{ .ip = remote_addr.ipv4.ip, .port = remote_addr.ipv4.port } }, indication_tx);
+    try builder.add_attr(usage_turn.data_attr_type, success);
+    const indication = try builder.finish();
+    _ = try turn_server.send_to(received.from, indication);
+
+    var recv_buf: [512]u8 = undefined;
+    var send_buf: [512]u8 = undefined;
+    var completed: [2]conncheck.CompletedCheck = undefined;
+    var timed_out: [2]ice_runtime.TimedOutCheck = undefined;
+    const summary = try bridge.advance_bidirectional(100, &recv_buf, &send_buf, &completed, &timed_out, .{});
+
+    try std.testing.expectEqual(@as(usize, 1), summary.completed_checks);
+    try std.testing.expectEqual(@as(u64, 13_000), completed[0].meta.candidate_pair_id);
+}
