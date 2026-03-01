@@ -9,6 +9,7 @@ pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
 pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
 pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
+pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 
 pub const version = "0.0.1";
 
@@ -63,4 +64,13 @@ test "stun parser export is reachable" {
 
     const view = try parse_stun_message(&packet);
     try std.testing.expectEqual(@as(usize, 0), view.body.len);
+}
+
+test "stun builder export is reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [32]u8 = undefined;
+
+    var builder = try StunMessageBuilder.init(&packet, 0x0001, tx_id);
+    const bytes = try builder.finish();
+    try std.testing.expectEqual(@as(usize, 20), bytes.len);
 }
