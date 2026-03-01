@@ -13,6 +13,9 @@ pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
 pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
 pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
+pub const StunRetryPolicy = @import("protocol/stun/timer.zig").RetryPolicy;
+pub const StunPendingTransaction = @import("protocol/stun/transaction.zig").PendingTransaction;
+pub const StunTransactionStore = @import("protocol/stun/transaction.zig").TransactionStore;
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
 pub const stun_build_binding_request = @import("protocol/stun/usage_bind.zig").build_binding_request;
@@ -130,6 +133,11 @@ test "stun transaction exports are reachable" {
 
     const tx = stun_tx_from_rng(random);
     try std.testing.expect(stun_tx_equals(tx, tx));
+
+    var store = StunTransactionStore.init(std.testing.allocator, StunRetryPolicy{});
+    defer store.deinit();
+    try store.start(tx, 0, 9);
+    try std.testing.expectEqual(@as(usize, 1), store.count());
 }
 
 test "crypto exports are reachable" {
