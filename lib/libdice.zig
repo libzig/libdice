@@ -146,6 +146,7 @@ pub const TurnUdpAllocationLease = @import("net/turn_socket_udp.zig").Allocation
 pub const TurnTcpFramer = @import("net/turn_socket_tcp.zig").TurnTcpFramer;
 pub const TurnTcpPacket = @import("net/turn_socket_tcp.zig").TurnTcpPacket;
 pub const turn_tcp_encode_framed_payload = @import("net/turn_socket_tcp.zig").encode_framed_payload;
+pub const TurnTcpClient = @import("net/turn_socket_tcp_client.zig").TurnTcpClient;
 pub const IceUdpRuntimeBridge = @import("net/ice_udp_runtime.zig").IceUdpRuntimeBridge;
 pub const IceUdpPollSummary = @import("net/ice_udp_runtime.zig").PollSummary;
 pub const IceUdpAdvanceSummary = @import("net/ice_udp_runtime.zig").AdvanceSummary;
@@ -684,6 +685,22 @@ test "tcp candidate socket exports are reachable" {
 
     var stream = try TcpCandidateStream.connect_nonblocking(listener.local_address());
     defer stream.deinit();
+
+    var accepted: ?TcpCandidateStream = null;
+    var i: usize = 0;
+    while (i < 200 and accepted == null) : (i += 1) {
+        accepted = try listener.accept_nonblocking();
+    }
+    try std.testing.expect(accepted != null);
+    accepted.?.deinit();
+}
+
+test "turn tcp client export is reachable" {
+    var listener = try TcpCandidateListener.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, 4);
+    defer listener.deinit();
+
+    var client = try TurnTcpClient.connect_nonblocking(std.testing.allocator, listener.local_address());
+    defer client.deinit();
 
     var accepted: ?TcpCandidateStream = null;
     var i: usize = 0;
