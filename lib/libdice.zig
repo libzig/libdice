@@ -31,6 +31,10 @@ pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerp
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
 pub const stun_verify_message_integrity = @import("protocol/stun/integrity.zig").verify_message_integrity;
 pub const stun_compute_fingerprint = @import("protocol/stun/integrity.zig").compute_fingerprint;
+pub const stun_add_message_integrity_attr = @import("protocol/stun/integrity.zig").add_message_integrity_attr;
+pub const stun_add_fingerprint_attr = @import("protocol/stun/integrity.zig").add_fingerprint_attr;
+pub const stun_verify_embedded_message_integrity = @import("protocol/stun/integrity.zig").verify_embedded_message_integrity;
+pub const stun_verify_embedded_fingerprint = @import("protocol/stun/integrity.zig").verify_embedded_fingerprint;
 pub const HmacSha1Mac = @import("crypto/hmac_sha1.zig").Mac;
 pub const hmac_sha1_compute = @import("crypto/hmac_sha1.zig").compute;
 pub const hmac_sha1_verify = @import("crypto/hmac_sha1.zig").verify;
@@ -125,6 +129,18 @@ test "stun integrity exports are reachable" {
     try std.testing.expect(fp != 0);
     try std.testing.expectEqual(@as(u16, 0x0008), stun_message_integrity_type);
     try std.testing.expectEqual(@as(u16, 0x8028), stun_fingerprint_type);
+
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [128]u8 = undefined;
+    var builder = try StunMessageBuilder.init(&packet, 0x0001, tx_id);
+    try builder.add_attr(0x0006, "user");
+    try stun_add_message_integrity_attr(&builder, "secret");
+    try stun_add_fingerprint_attr(&builder);
+
+    const bytes = try builder.finish();
+    const view = try parse_stun_message(bytes);
+    try std.testing.expect(try stun_verify_embedded_message_integrity(view, "secret"));
+    try std.testing.expect(try stun_verify_embedded_fingerprint(view));
 }
 
 test "stun bind usage exports are reachable" {

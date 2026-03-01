@@ -8,6 +8,7 @@ pub const ParserError = message.ParseError || attrs.AttrError || error{
 
 pub const MessageView = struct {
     header: message.Header,
+    raw: []const u8,
     body: []const u8,
 
     pub fn attr_iterator(self: MessageView) AttrIterator {
@@ -18,6 +19,7 @@ pub const MessageView = struct {
 pub const AttrView = struct {
     header: attrs.AttrHeader,
     value: []const u8,
+    total_size: usize,
 };
 
 pub const AttrIterator = struct {
@@ -32,6 +34,7 @@ pub const AttrIterator = struct {
         return .{
             .header = view.header,
             .value = view.value,
+            .total_size = view.total_size,
         };
     }
 };
@@ -45,6 +48,7 @@ pub fn parse_message(input: []const u8) ParserError!MessageView {
 
     return .{
         .header = header,
+        .raw = input[0..total_len],
         .body = input[message.header_size..total_len],
     };
 }

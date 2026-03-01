@@ -1,4 +1,7 @@
 const std = @import("std");
+const message = @import("message.zig");
+const encoder = @import("encoder.zig");
+const parser = @import("parser.zig");
 const hmac_sha1 = @import("../../crypto/hmac_sha1.zig");
 
 pub const message_integrity_type: u16 = 0x0008;
@@ -7,6 +10,11 @@ pub const message_integrity_size: usize = hmac_sha1.mac_length;
 pub const fingerprint_type: u16 = 0x8028;
 pub const fingerprint_size: usize = 4;
 pub const fingerprint_xor: u32 = 0x5354554e;
+
+pub const IntegrityError = parser.ParserError || error{
+    MissingAttribute,
+    InvalidAttrLength,
+};
 
 pub fn compute_message_integrity(message_bytes: []const u8, key: []const u8) hmac_sha1.Mac {
     return hmac_sha1.compute(key, message_bytes);
@@ -34,6 +42,81 @@ pub fn write_fingerprint_be(out: []u8, message_bytes: []const u8) error{BufferTo
 pub fn read_fingerprint_be(in: []const u8) error{BufferTooSmall}!u32 {
     if (in.len < fingerprint_size) return error.BufferTooSmall;
     return std.mem.readInt(u32, in[0..4], .big);
+}
+
+pub fn add_message_integrity_attr(builder: *encoder.Builder, key: []const u8) encoder.EncodeError!void {
+    const prefix = try builder.finish();
+    const mac = compute_message_integrity(prefix, key);
+    try builder.add_attr(message_integrity_type, &mac);
+}
+
+pub fn add_fingerprint_attr(builder: *encoder.Builder) encoder.EncodeError!void {
+    const prefix = try builder.finish();
+
+    var value: [4]u8 = undefined;
+    std.mem.writeInt(u32, &value, compute_fingerprint(prefix), .big);
+    try builder.add_attr(fingerprint_type, &value);
+}
+
+fn find_attr_with_offset(view: parser.MessageView, attr_type: u16) parser.ParserError!?struct {
+    attr: parser.AttrView,
+    body_offset: usize,
+} {
+    var it = view.attr_iterator();
+    var body_offset: usize = 0;
+
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == attr_type) {
+            return .{ .attr = attr, .body_offset = body_offset };
+        }
+        body_offset += attr.total_size;
+    }
+
+    return null;
+}
+
+fn compute_message_integrity_for_body_prefix(header: message.Header, body_prefix: []const u8, key: []const u8) hmac_sha1.Mac {
+    var encoded_header: [message.header_size]u8 = undefined;
+    const adjusted_header = message.Header.init(header.message_type, @intCast(body_prefix.len), header.transaction_id);
+    _ = adjusted_header.encode(&encoded_header) catch unreachable;
+
+    var mac: hmac_sha1.Mac = undefined;
+    var hmac_ctx = std.crypto.auth.hmac.HmacSha1.init(key);
+    hmac_ctx.update(&encoded_header);
+    hmac_ctx.update(body_prefix);
+    hmac_ctx.final(&mac);
+    return mac;
+}
+
+fn compute_fingerprint_for_body_prefix(header: message.Header, body_prefix: []const u8) u32 {
+    var encoded_header: [message.header_size]u8 = undefined;
+    const adjusted_header = message.Header.init(header.message_type, @intCast(body_prefix.len), header.transaction_id);
+    _ = adjusted_header.encode(&encoded_header) catch unreachable;
+
+    var crc = std.hash.Crc32.init();
+    crc.update(&encoded_header);
+    crc.update(body_prefix);
+    return crc.final() ^ fingerprint_xor;
+}
+
+pub fn verify_embedded_message_integrity(view: parser.MessageView, key: []const u8) IntegrityError!bool {
+    const found = try find_attr_with_offset(view, message_integrity_type) orelse return error.MissingAttribute;
+    if (found.attr.value.len != message_integrity_size) return error.InvalidAttrLength;
+
+    const expected = compute_message_integrity_for_body_prefix(view.header, view.body[0..found.body_offset], key);
+
+    var actual: hmac_sha1.Mac = undefined;
+    @memcpy(&actual, found.attr.value[0..message_integrity_size]);
+    return std.crypto.timing_safe.eql(hmac_sha1.Mac, expected, actual);
+}
+
+pub fn verify_embedded_fingerprint(view: parser.MessageView) IntegrityError!bool {
+    const found = try find_attr_with_offset(view, fingerprint_type) orelse return error.MissingAttribute;
+    if (found.attr.value.len != fingerprint_size) return error.InvalidAttrLength;
+
+    const expected = compute_fingerprint_for_body_prefix(view.header, view.body[0..found.body_offset]);
+    const actual = std.mem.readInt(u32, found.attr.value[0..4], .big);
+    return expected == actual;
 }
 
 test "message integrity known vector" {
@@ -65,4 +148,46 @@ test "integrity writers reject short buffers" {
     var fp_buf: [3]u8 = undefined;
     try std.testing.expectError(error.BufferTooSmall, write_fingerprint_be(&fp_buf, "data"));
     try std.testing.expectError(error.BufferTooSmall, read_fingerprint_be(&fp_buf));
+}
+
+test "embedded message integrity verification" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [128]u8 = undefined;
+
+    var builder = try encoder.Builder.init(&packet, 0x0001, tx_id);
+    try builder.add_attr(0x0006, "user");
+    try add_message_integrity_attr(&builder, "secret");
+
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+
+    try std.testing.expect(try verify_embedded_message_integrity(view, "secret"));
+    try std.testing.expect(!(try verify_embedded_message_integrity(view, "wrong-secret")));
+}
+
+test "embedded fingerprint verification" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [128]u8 = undefined;
+
+    var builder = try encoder.Builder.init(&packet, 0x0001, tx_id);
+    try builder.add_attr(0x0006, "user");
+    try add_fingerprint_attr(&builder);
+
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+    try std.testing.expect(try verify_embedded_fingerprint(view));
+}
+
+test "embedded integrity helpers fail when attribute missing" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [64]u8 = undefined;
+
+    var builder = try encoder.Builder.init(&packet, 0x0001, tx_id);
+    try builder.add_attr(0x0006, "user");
+
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+
+    try std.testing.expectError(error.MissingAttribute, verify_embedded_message_integrity(view, "key"));
+    try std.testing.expectError(error.MissingAttribute, verify_embedded_fingerprint(view));
 }
