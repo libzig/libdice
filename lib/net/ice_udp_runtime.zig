@@ -3,7 +3,9 @@ const candidate = @import("../core/candidate.zig");
 const conncheck = @import("../core/conncheck.zig");
 const ice_runtime = @import("../core/ice_runtime.zig");
 const udp_dispatch = @import("udp_dispatch.zig");
+const turn_socket_udp = @import("turn_socket_udp.zig");
 const usage_ice = @import("../protocol/stun/usage_ice.zig");
+const usage_turn = @import("../protocol/stun/usage_turn.zig");
 const parser = @import("../protocol/stun/parser.zig");
 
 pub const PollSummary = struct {
@@ -123,19 +125,31 @@ pub const DriveLoopSummary = struct {
 };
 
 pub const IceUdpRuntimeBridge = struct {
+    const TurnBinding = struct {
+        stream_id: u32,
+        component_id: u16,
+        socket: turn_socket_udp.TurnUdpSocket,
+    };
+
     allocator: std.mem.Allocator,
     runtime: *ice_runtime.IceRuntime,
     dispatch: udp_dispatch.UdpDispatch,
+    turn_bindings: std.ArrayList(TurnBinding),
 
     pub fn init(allocator: std.mem.Allocator, runtime: *ice_runtime.IceRuntime) IceUdpRuntimeBridge {
         return .{
             .allocator = allocator,
             .runtime = runtime,
             .dispatch = udp_dispatch.UdpDispatch.init(allocator),
+            .turn_bindings = .empty,
         };
     }
 
     pub fn deinit(self: *IceUdpRuntimeBridge) void {
+        for (self.turn_bindings.items) |*binding| {
+            binding.socket.deinit();
+        }
+        self.turn_bindings.deinit(self.allocator);
         self.dispatch.deinit();
     }
 
@@ -143,8 +157,51 @@ pub const IceUdpRuntimeBridge = struct {
         return self.dispatch.add_binding(stream_id, component_id, local);
     }
 
+    pub fn add_turn_binding(
+        self: *IceUdpRuntimeBridge,
+        stream_id: u32,
+        component_id: u16,
+        local_bind: candidate.Address,
+        turn_server: candidate.Address,
+    ) !candidate.Address {
+        var socket = try turn_socket_udp.TurnUdpSocket.init_nonblocking(self.allocator, local_bind, turn_server);
+        const bound = try socket.local_address();
+        try self.turn_bindings.append(self.allocator, .{
+            .stream_id = stream_id,
+            .component_id = component_id,
+            .socket = socket,
+        });
+        return bound;
+    }
+
     pub fn send(self: *IceUdpRuntimeBridge, stream_id: u32, component_id: u16, remote: candidate.Address, payload: []const u8) !usize {
         return self.dispatch.send(stream_id, component_id, remote, payload);
+    }
+
+    fn find_turn_binding(self: *IceUdpRuntimeBridge, stream_id: u32, component_id: u16) ?*TurnBinding {
+        for (self.turn_bindings.items) |*binding| {
+            if (binding.stream_id == stream_id and binding.component_id == component_id) return binding;
+        }
+        return null;
+    }
+
+    fn send_check_packet(
+        self: *IceUdpRuntimeBridge,
+        stream_id: u32,
+        component_id: u16,
+        local_candidate_id: u64,
+        remote: candidate.Address,
+        transaction_id: [12]u8,
+        packet: []const u8,
+        now_ms: u64,
+    ) !usize {
+        const local_candidate = try self.runtime.agent.find_local_candidate_by_id(stream_id, local_candidate_id);
+        if (local_candidate.candidate_type == .relay) {
+            const binding = self.find_turn_binding(stream_id, component_id) orelse return error.NotFound;
+            return binding.socket.send_to_peer(@constCast(packet), transaction_id, remote, packet, now_ms);
+        }
+
+        return self.dispatch.send(stream_id, component_id, remote, packet);
     }
 
     pub fn start_and_send_next_check(
@@ -158,7 +215,15 @@ pub const IceUdpRuntimeBridge = struct {
 
         const remote_candidate = try self.runtime.agent.find_remote_candidate_by_id(started.stream_id, started.remote_candidate_id);
         const packet = try usage_ice.build_connectivity_check_request(packet_buf, started.transaction_id, options);
-        _ = try self.dispatch.send(started.stream_id, started.component_id, remote_candidate.address, packet);
+        _ = try self.send_check_packet(
+            started.stream_id,
+            started.component_id,
+            started.local_candidate_id,
+            remote_candidate.address,
+            started.transaction_id,
+            packet,
+            now_ms,
+        );
 
         return .{
             .started = started,
@@ -204,6 +269,18 @@ pub const IceUdpRuntimeBridge = struct {
             summary.requests_handled += 1;
         }
 
+        const turn_result = try self.drain_turn_packets(
+            0,
+            recv_buf,
+            send_buf,
+            &[_]conncheck.CompletedCheck{},
+            .{ .request_integrity_key = request_integrity_key, .response_options = response_options },
+            true,
+        );
+        summary.packets_seen += turn_result.packets_seen;
+        summary.requests_handled += turn_result.requests_handled;
+        summary.ignored_packets += turn_result.ignored_packets;
+
         return summary;
     }
 
@@ -247,6 +324,15 @@ pub const IceUdpRuntimeBridge = struct {
             }
             summary.completed_checks += 1;
         }
+
+        const turn_out = if (summary.completed_checks < out_completed.len)
+            out_completed[summary.completed_checks..]
+        else
+            out_completed[out_completed.len..];
+        const turn_result = try self.drain_turn_packets(now_ms, recv_buf, recv_buf, turn_out, .{}, false);
+        summary.packets_seen += turn_result.packets_seen;
+        summary.ignored_packets += turn_result.ignored_packets;
+        summary.completed_checks += turn_result.completed_checks;
 
         return summary;
     }
@@ -325,6 +411,16 @@ pub const IceUdpRuntimeBridge = struct {
             }
             summary.completed_checks += 1;
         }
+
+        const turn_out = if (summary.completed_checks < out_completed.len)
+            out_completed[summary.completed_checks..]
+        else
+            out_completed[out_completed.len..];
+        const turn_result = try self.drain_turn_packets(now_ms, recv_buf, send_buf, turn_out, options, true);
+        summary.packets_seen += turn_result.packets_seen;
+        summary.completed_checks += turn_result.completed_checks;
+        summary.requests_handled += turn_result.requests_handled;
+        summary.ignored_packets += turn_result.ignored_packets;
 
         summary.timed_out_checks = try self.runtime.expire_all(now_ms, out_timed_out);
         summary.failed_consents = self.runtime.tick_consent_all(now_ms).failed_components;
@@ -621,7 +717,15 @@ pub const IceUdpRuntimeBridge = struct {
         for (due[0..@min(due.len, count)]) |item| {
             const remote_candidate = try self.runtime.agent.find_remote_candidate_by_id(item.stream_id, item.remote_candidate_id);
             const packet = try usage_ice.build_connectivity_check_request(packet_buf, item.transaction_id, options);
-            _ = try self.dispatch.send(item.stream_id, item.component_id, remote_candidate.address, packet);
+            _ = try self.send_check_packet(
+                item.stream_id,
+                item.component_id,
+                item.local_candidate_id,
+                remote_candidate.address,
+                item.transaction_id,
+                packet,
+                now_ms,
+            );
             try self.runtime.mark_retransmitted(item.stream_id, item.component_id, item.transaction_id, now_ms);
 
             if (written < out_sent.len) {
@@ -635,6 +739,81 @@ pub const IceUdpRuntimeBridge = struct {
         }
 
         return written;
+    }
+
+    const TurnDrainSummary = struct {
+        packets_seen: usize,
+        completed_checks: usize,
+        requests_handled: usize,
+        ignored_packets: usize,
+    };
+
+    fn drain_turn_packets(
+        self: *IceUdpRuntimeBridge,
+        now_ms: u64,
+        recv_buf: []u8,
+        send_buf: []u8,
+        out_completed: []conncheck.CompletedCheck,
+        options: BidirectionalAdvanceOptions,
+        handle_requests: bool,
+    ) !TurnDrainSummary {
+        var summary = TurnDrainSummary{
+            .packets_seen = 0,
+            .completed_checks = 0,
+            .requests_handled = 0,
+            .ignored_packets = 0,
+        };
+
+        for (self.turn_bindings.items) |*binding| {
+            while (true) {
+                const maybe_packet = try binding.socket.recv_from_server(recv_buf);
+                const packet = maybe_packet orelse break;
+                summary.packets_seen += 1;
+
+                switch (packet) {
+                    .relayed_data => |relayed| {
+                        const view = parser.parse_message(relayed.payload) catch {
+                            summary.ignored_packets += 1;
+                            continue;
+                        };
+
+                        if (handle_requests and usage_ice.is_connectivity_check_request(view)) {
+                            _ = usage_ice.parse_connectivity_check_request(view, options.request_integrity_key) catch {
+                                summary.ignored_packets += 1;
+                                continue;
+                            };
+
+                            const response = try usage_ice.build_connectivity_check_success_response(send_buf, view.header.transaction_id, options.response_options);
+                            _ = try binding.socket.send_to_peer(send_buf, view.header.transaction_id, relayed.peer, response, now_ms);
+                            summary.requests_handled += 1;
+                            continue;
+                        }
+
+                        const completed = self.runtime.on_response(binding.stream_id, binding.component_id, view, now_ms) catch |err| switch (err) {
+                            error.NotResponse,
+                            error.UnknownTransaction,
+                            error.NotFound,
+                            error.UnknownTransactionContext,
+                            => {
+                                summary.ignored_packets += 1;
+                                continue;
+                            },
+                            else => return err,
+                        };
+
+                        if (summary.completed_checks < out_completed.len) {
+                            out_completed[summary.completed_checks] = completed;
+                        }
+                        summary.completed_checks += 1;
+                    },
+                    else => {
+                        summary.ignored_packets += 1;
+                    },
+                }
+            }
+        }
+
+        return summary;
     }
 };
 
@@ -1527,4 +1706,62 @@ test "udp bridge pump once with handlers invokes callbacks" {
 
     try std.testing.expect(state.completed >= 1);
     try std.testing.expect(state.events >= 1);
+}
+
+test "udp bridge routes relay local candidate checks through TURN send indication" {
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const relay_local: candidate.Address = .{ .ipv4 = .{ .ip = .{ 10, 0, 0, 2 }, .port = 60000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 44 }, .port = 5000 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 301,
+        .component_id = 1,
+        .candidate_type = .relay,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .relay, relay_local),
+        .priority = candidate.compute_candidate_priority(.relay, 50, 1),
+        .address = relay_local,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 302,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 100, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 12_000);
+    try runtime.start_connecting_all();
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    var prng = std.Random.DefaultPrng.init(45);
+    var out_packet: [512]u8 = undefined;
+    _ = (try bridge.start_and_send_next_check(prng.random(), 0, &out_packet, .{
+        .username = "l:r",
+        .priority = 777,
+        .role = .{ .role = .controlling, .tie_breaker = 42 },
+    })).?;
+
+    var recv_buf: [512]u8 = undefined;
+    const got = try turn_server.recv_from(&recv_buf);
+    const outer = try parser.parse_message(recv_buf[0..got.bytes]);
+    try std.testing.expectEqual(@as(u16, usage_turn.send_indication_type), outer.header.message_type);
+    const inner_payload = (try usage_turn.read_data_attr(outer)).?;
+    const inner = try parser.parse_message(inner_payload);
+    try std.testing.expect(usage_ice.is_connectivity_check_request(inner));
 }

@@ -38,7 +38,9 @@ pub const ReceivedPacket = union(enum) {
     },
 };
 
-pub const TurnUdpSocketError = parser.ParserError || channel_data.ChannelDataError || usage_turn.TurnError || error{
+pub const UdpRecvError = @typeInfo(@typeInfo(@TypeOf(udp_socket.UdpSocket.recv_from)).@"fn".return_type.?).error_union.error_set;
+
+pub const TurnUdpSocketError = UdpRecvError || parser.ParserError || channel_data.ChannelDataError || usage_turn.TurnError || error{
     UnexpectedSource,
 };
 
