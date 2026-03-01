@@ -29,11 +29,17 @@ pub const stun_ice_is_connectivity_check_request = @import("protocol/stun/usage_
 pub const stun_ice_is_connectivity_check_success_response = @import("protocol/stun/usage_ice.zig").is_connectivity_check_success_response;
 pub const stun_turn_build_allocate_request = @import("protocol/stun/usage_turn.zig").build_allocate_request;
 pub const stun_turn_build_refresh_request = @import("protocol/stun/usage_turn.zig").build_refresh_request;
+pub const stun_turn_build_channel_bind_request = @import("protocol/stun/usage_turn.zig").build_channel_bind_request;
+pub const stun_turn_build_send_indication = @import("protocol/stun/usage_turn.zig").build_send_indication;
 pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
 pub const stun_turn_is_allocate_error_response = @import("protocol/stun/usage_turn.zig").is_allocate_error_response;
 pub const stun_turn_read_lifetime_seconds = @import("protocol/stun/usage_turn.zig").read_lifetime_seconds;
 pub const stun_turn_read_requested_transport = @import("protocol/stun/usage_turn.zig").read_requested_transport;
 pub const stun_turn_read_error_code = @import("protocol/stun/usage_turn.zig").read_error_code;
+pub const stun_turn_parse_allocate_success_response = @import("protocol/stun/usage_turn.zig").parse_allocate_success_response;
+pub const stun_turn_parse_refresh_success_response = @import("protocol/stun/usage_turn.zig").parse_refresh_success_response;
+pub const stun_turn_read_channel_number = @import("protocol/stun/usage_turn.zig").read_channel_number;
+pub const stun_turn_read_data_attr = @import("protocol/stun/usage_turn.zig").read_data_attr;
 pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
 pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
 pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
@@ -218,4 +224,19 @@ test "stun turn usage exports are reachable" {
     try std.testing.expect(!stun_turn_is_allocate_success_response(view));
     try std.testing.expect(!stun_turn_is_allocate_error_response(view));
     try std.testing.expectEqual(@as(?u16, null), try stun_turn_read_error_code(view));
+
+    const peer: StunAddress = .{ .ipv4 = .{ .port = 7777, .ip = .{ 203, 0, 113, 9 } } };
+    const bind_bytes = try stun_turn_build_channel_bind_request(&packet, tx_id, .{
+        .channel_number = 0x4002,
+        .peer_address = peer,
+    });
+    const bind_view = try parse_stun_message(bind_bytes);
+    try std.testing.expectEqual(@as(?u16, 0x4002), try stun_turn_read_channel_number(bind_view));
+
+    const send_bytes = try stun_turn_build_send_indication(&packet, tx_id, .{
+        .peer_address = peer,
+        .data = "x",
+    });
+    const send_view = try parse_stun_message(send_bytes);
+    try std.testing.expectEqualStrings("x", (try stun_turn_read_data_attr(send_view)).?);
 }

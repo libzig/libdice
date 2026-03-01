@@ -5,6 +5,8 @@ const parser = @import("parser.zig");
 const encoder = @import("encoder.zig");
 
 pub const xor_mapped_address_attr_type: u16 = 0x0020;
+pub const xor_peer_address_attr_type: u16 = 0x0012;
+pub const xor_relayed_address_attr_type: u16 = 0x0016;
 
 pub const family_ipv4: u8 = 0x01;
 pub const family_ipv6: u8 = 0x02;
@@ -12,6 +14,7 @@ pub const family_ipv6: u8 = 0x02;
 pub const AddressAttrError = error{
     InvalidAttrLength,
     InvalidFamily,
+    InvalidAttrType,
     BufferTooSmall,
 };
 
@@ -72,8 +75,10 @@ pub fn encode_xor_mapped_address_value(out: []u8, address: StunAddress, transact
     }
 }
 
-pub fn decode_xor_mapped_address(attr: parser.AttrView, transaction_id: [12]u8) AddressAttrError!StunAddress {
-    if (attr.header.attr_type != xor_mapped_address_attr_type) return error.InvalidFamily;
+pub fn decode_xor_address(attr: parser.AttrView, transaction_id: [12]u8) AddressAttrError!StunAddress {
+    if (attr.header.attr_type != xor_mapped_address_attr_type and attr.header.attr_type != xor_peer_address_attr_type and attr.header.attr_type != xor_relayed_address_attr_type) {
+        return error.InvalidAttrType;
+    }
     if (attr.value.len < 4) return error.InvalidAttrLength;
 
     const cookie = cookie_bytes();
@@ -108,16 +113,49 @@ pub fn decode_xor_mapped_address(attr: parser.AttrView, transaction_id: [12]u8) 
     }
 }
 
+pub fn decode_xor_mapped_address(attr: parser.AttrView, transaction_id: [12]u8) AddressAttrError!StunAddress {
+    if (attr.header.attr_type != xor_mapped_address_attr_type) return error.InvalidAttrType;
+    return decode_xor_address(attr, transaction_id);
+}
+
 pub fn add_xor_mapped_address(builder: *encoder.Builder, address: StunAddress, transaction_id: [12]u8) encoder.EncodeError!void {
     var value_buf: [20]u8 = undefined;
     const value = encode_xor_mapped_address_value(&value_buf, address, transaction_id) catch return error.BufferTooSmall;
     try builder.add_attr(xor_mapped_address_attr_type, value);
 }
 
+pub fn add_xor_peer_address(builder: *encoder.Builder, address: StunAddress, transaction_id: [12]u8) encoder.EncodeError!void {
+    var value_buf: [20]u8 = undefined;
+    const value = encode_xor_mapped_address_value(&value_buf, address, transaction_id) catch return error.BufferTooSmall;
+    try builder.add_attr(xor_peer_address_attr_type, value);
+}
+
+pub fn add_xor_relayed_address(builder: *encoder.Builder, address: StunAddress, transaction_id: [12]u8) encoder.EncodeError!void {
+    var value_buf: [20]u8 = undefined;
+    const value = encode_xor_mapped_address_value(&value_buf, address, transaction_id) catch return error.BufferTooSmall;
+    try builder.add_attr(xor_relayed_address_attr_type, value);
+}
+
 pub fn find_xor_mapped_address(view: parser.MessageView) parser.ParserError!?parser.AttrView {
     var it = view.attr_iterator();
     while (try it.next()) |attr| {
         if (attr.header.attr_type == xor_mapped_address_attr_type) return attr;
+    }
+    return null;
+}
+
+pub fn find_xor_peer_address(view: parser.MessageView) parser.ParserError!?parser.AttrView {
+    var it = view.attr_iterator();
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == xor_peer_address_attr_type) return attr;
+    }
+    return null;
+}
+
+pub fn find_xor_relayed_address(view: parser.MessageView) parser.ParserError!?parser.AttrView {
+    var it = view.attr_iterator();
+    while (try it.next()) |attr| {
+        if (attr.header.attr_type == xor_relayed_address_attr_type) return attr;
     }
     return null;
 }
@@ -164,4 +202,26 @@ test "xor-mapped-address rejects malformed length" {
     const attr = parser.AttrView{ .header = view.header, .value = view.value, .total_size = view.total_size };
 
     try std.testing.expectError(error.InvalidAttrLength, decode_xor_mapped_address(attr, tx_id));
+}
+
+test "xor-peer and xor-relayed helper adders" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    const peer: StunAddress = .{ .ipv4 = .{ .port = 4000, .ip = .{ 198, 51, 100, 5 } } };
+    const relayed: StunAddress = .{ .ipv4 = .{ .port = 5000, .ip = .{ 203, 0, 113, 99 } } };
+
+    var packet: [128]u8 = undefined;
+    var builder = try encoder.Builder.init(&packet, 0x0001, tx_id);
+    try add_xor_peer_address(&builder, peer, tx_id);
+    try add_xor_relayed_address(&builder, relayed, tx_id);
+
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+
+    const peer_attr = (try find_xor_peer_address(view)).?;
+    const relayed_attr = (try find_xor_relayed_address(view)).?;
+
+    const decoded_peer = try decode_xor_address(peer_attr, tx_id);
+    const decoded_relayed = try decode_xor_address(relayed_attr, tx_id);
+    try std.testing.expectEqualDeep(peer, decoded_peer);
+    try std.testing.expectEqualDeep(relayed, decoded_relayed);
 }
