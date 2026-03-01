@@ -7,6 +7,8 @@ pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
+pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
+pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
 
 pub const version = "0.0.1";
 
@@ -51,4 +53,14 @@ test "stun header export is reachable" {
 test "stun attr header export is reachable" {
     const attr = StunAttrHeader.init(0x0006, 5);
     try std.testing.expectEqual(@as(u16, 0x0006), attr.attr_type);
+}
+
+test "stun parser export is reachable" {
+    const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var packet: [20]u8 = undefined;
+    const header = StunHeader.init(0x0001, 0, tx_id);
+    _ = try header.encode(&packet);
+
+    const view = try parse_stun_message(&packet);
+    try std.testing.expectEqual(@as(usize, 0), view.body.len);
 }
