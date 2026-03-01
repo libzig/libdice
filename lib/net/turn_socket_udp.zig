@@ -76,6 +76,7 @@ pub const TurnUdpSocket = struct {
         ignored,
         handled,
         auth_challenge_required,
+        error_non_retryable,
     };
 
     allocator: std.mem.Allocator,
@@ -88,6 +89,7 @@ pub const TurnUdpSocket = struct {
     auth_realm: std.ArrayList(u8),
     auth_nonce: std.ArrayList(u8),
     auth_retry_required: bool,
+    last_error_code: ?u16,
 
     pub fn init_nonblocking(allocator: std.mem.Allocator, local_bind: candidate.Address, server: candidate.Address) !TurnUdpSocket {
         return .{
@@ -101,6 +103,7 @@ pub const TurnUdpSocket = struct {
             .auth_realm = .empty,
             .auth_nonce = .empty,
             .auth_retry_required = false,
+            .last_error_code = null,
         };
     }
 
@@ -185,6 +188,10 @@ pub const TurnUdpSocket = struct {
         self.auth_retry_required = false;
     }
 
+    pub fn latest_error_code(self: *const TurnUdpSocket) ?u16 {
+        return self.last_error_code;
+    }
+
     pub fn auth_realm_value(self: *const TurnUdpSocket) ?[]const u8 {
         if (self.auth_realm.items.len == 0) return null;
         return self.auth_realm.items;
@@ -197,6 +204,7 @@ pub const TurnUdpSocket = struct {
 
     fn on_server_error(self: *TurnUdpSocket, view: parser.MessageView) !ServerStunOutcome {
         const code = (try usage_turn.read_error_code(view)) orelse return .ignored;
+        self.last_error_code = code;
         _ = self.take_pending_refresh(view.header.transaction_id);
 
         if (code == 401 or code == 438) {
@@ -207,7 +215,7 @@ pub const TurnUdpSocket = struct {
             return .auth_challenge_required;
         }
 
-        return .handled;
+        return .error_non_retryable;
     }
 
     fn set_auth_challenge(self: *TurnUdpSocket, realm: []const u8, nonce: []const u8) !void {
@@ -595,6 +603,28 @@ test "turn udp socket captures auth challenge from stale nonce error" {
     try std.testing.expect(turn.has_auth_retry_required());
     try std.testing.expectEqualStrings("example.org", turn.auth_realm_value().?);
     try std.testing.expectEqualStrings("new-nonce", turn.auth_nonce_value().?);
+    try std.testing.expectEqual(@as(?u16, 438), turn.latest_error_code());
+}
+
+test "turn udp socket reports non-retryable TURN errors" {
+    var turn = try TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+    defer turn.deinit();
+
+    const tx_id = [_]u8{ 1, 9, 1, 9, 1, 9, 1, 9, 1, 9, 1, 9 };
+    var packet: [192]u8 = undefined;
+    var builder = try @import("../protocol/stun/encoder.zig").Builder.init(&packet, usage_turn.allocate_error_response_type, tx_id);
+    const err_500 = [_]u8{ 0x00, 0x00, 0x05, 0x00 };
+    try builder.add_attr(usage_turn.error_code_attr_type, &err_500);
+    const bytes = try builder.finish();
+    const view = try parser.parse_message(bytes);
+
+    try std.testing.expectEqual(TurnUdpSocket.ServerStunOutcome.error_non_retryable, try turn.on_server_stun(view, 0, null));
+    try std.testing.expect(!turn.has_auth_retry_required());
+    try std.testing.expectEqual(@as(?u16, 500), turn.latest_error_code());
 }
 
 test "turn udp socket sends and decodes channel data" {
