@@ -9,6 +9,9 @@ const usage_turn = @import("../protocol/stun/usage_turn.zig");
 const address_attrs = @import("../protocol/stun/address_attrs.zig");
 const parser = @import("../protocol/stun/parser.zig");
 
+const TURN_BACKOFF_BASE_MS: u64 = 1_000;
+const TURN_BACKOFF_MAX_MS: u64 = 60_000;
+
 pub const PollSummary = struct {
     packets_seen: usize,
     completed_checks: usize,
@@ -78,6 +81,7 @@ pub const TurnMaintenanceSummary = struct {
     allocation_refreshes_sent: usize,
     permission_refreshes_sent: usize,
     channel_refreshes_sent: usize,
+    backoff_skipped_bindings: usize,
     permissions_pruned: usize,
     channels_pruned: usize,
 
@@ -170,6 +174,8 @@ pub const IceUdpRuntimeBridge = struct {
         stream_id: u32,
         component_id: u16,
         socket: turn_socket_udp.TurnUdpSocket,
+        non_retryable_error_streak: u8 = 0,
+        maintenance_backoff_until_ms: u64 = 0,
     };
 
     allocator: std.mem.Allocator,
@@ -843,11 +849,17 @@ pub const IceUdpRuntimeBridge = struct {
             .allocation_refreshes_sent = 0,
             .permission_refreshes_sent = 0,
             .channel_refreshes_sent = 0,
+            .backoff_skipped_bindings = 0,
             .permissions_pruned = 0,
             .channels_pruned = 0,
         };
 
         for (self.turn_bindings.items) |*binding| {
+            if (now_ms < binding.maintenance_backoff_until_ms) {
+                summary.backoff_skipped_bindings += 1;
+                continue;
+            }
+
             const auth_retry = binding.socket.has_auth_retry_required();
             const realm = if (options.prefer_server_auth_challenge)
                 (binding.socket.auth_realm_value() orelse options.realm)
@@ -1003,12 +1015,21 @@ pub const IceUdpRuntimeBridge = struct {
                         const outcome = try binding.socket.on_server_stun(view, now_ms, null);
                         switch (outcome) {
                             .ignored => summary.ignored_packets += 1,
-                            .handled => summary.control_handled += 1,
+                            .handled => {
+                                binding.non_retryable_error_streak = 0;
+                                binding.maintenance_backoff_until_ms = 0;
+                                summary.control_handled += 1;
+                            },
                             .auth_challenge_required => {
+                                binding.non_retryable_error_streak = 0;
+                                binding.maintenance_backoff_until_ms = 0;
                                 summary.control_handled += 1;
                                 summary.auth_challenges += 1;
                             },
                             .error_non_retryable => {
+                                binding.non_retryable_error_streak = @min(@as(u8, 30), binding.non_retryable_error_streak + 1);
+                                const backoff_ms = compute_turn_backoff_ms(binding.non_retryable_error_streak);
+                                binding.maintenance_backoff_until_ms = now_ms +| backoff_ms;
                                 summary.control_handled += 1;
                                 summary.non_retryable_errors += 1;
                             },
@@ -1024,6 +1045,13 @@ pub const IceUdpRuntimeBridge = struct {
         return summary;
     }
 };
+
+fn compute_turn_backoff_ms(streak: u8) u64 {
+    if (streak == 0) return 0;
+    const shift: u6 = @intCast(@min(@as(u8, 15), streak - 1));
+    const scaled = TURN_BACKOFF_BASE_MS << shift;
+    return @min(TURN_BACKOFF_MAX_MS, scaled);
+}
 
 fn candidate_to_stun_address(address: candidate.Address) address_attrs.StunAddress {
     return switch (address) {
@@ -2591,4 +2619,61 @@ test "udp bridge reports non-retryable TURN errors" {
 
     try std.testing.expectEqual(@as(usize, 1), advanced.turn_non_retryable_errors);
     try std.testing.expectEqual(@as(usize, 0), advanced.turn_auth_challenges);
+}
+
+test "udp bridge applies bounded backoff after non-retryable TURN errors" {
+    const encoder = @import("../protocol/stun/encoder.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    var prng = std.Random.DefaultPrng.init(55);
+    var packet_buf: [512]u8 = undefined;
+    _ = try bridge.run_turn_maintenance(prng.random(), 0, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u" },
+    });
+
+    var recv: [512]u8 = undefined;
+    const req1 = try turn_server.recv_from(&recv);
+    const req1_view = try parser.parse_message(recv[0..req1.bytes]);
+
+    var err_buf: [256]u8 = undefined;
+    var err_builder = try encoder.Builder.init(&err_buf, usage_turn.allocate_error_response_type, req1_view.header.transaction_id);
+    const err_500 = [_]u8{ 0x00, 0x00, 0x05, 0x00 };
+    try err_builder.add_attr(usage_turn.error_code_attr_type, &err_500);
+    const err_packet = try err_builder.finish();
+    _ = try turn_server.send_to(req1.from, err_packet);
+
+    var recv_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    var timed_out: [1]ice_runtime.TimedOutCheck = undefined;
+    _ = try bridge.advance_bidirectional(10, &recv_buf, &send_buf, &completed, &timed_out, .{});
+
+    const early = try bridge.run_turn_maintenance(prng.random(), 500, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u" },
+    });
+    try std.testing.expectEqual(@as(usize, 0), early.allocations_requested);
+    try std.testing.expectEqual(@as(usize, 1), early.backoff_skipped_bindings);
+
+    const late = try bridge.run_turn_maintenance(prng.random(), 1_020, &packet_buf, .{
+        .allocate_if_missing = true,
+        .allocate_options = .{ .username = "u" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), late.allocations_requested);
 }
