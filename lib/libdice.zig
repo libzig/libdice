@@ -9,6 +9,9 @@ pub const ConnectivityCheckTracker = @import("core/conncheck.zig").ConnectivityC
 pub const ConnectivityCheckMeta = @import("core/conncheck.zig").CheckMeta;
 pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCheck;
 pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
+pub const IceTcpRoleAction = @import("core/ice_tcp.zig").TcpRoleAction;
+pub const ice_tcp_action_for_local_role = @import("core/ice_tcp.zig").action_for_local_role;
+pub const ice_tcp_action_for_pair = @import("core/ice_tcp.zig").action_for_pair;
 pub const ComponentConnectivityEngine = @import("core/connectivity_engine.zig").ComponentConnectivityEngine;
 pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairContext;
 pub const ConsentConfig = @import("core/consent.zig").ConsentConfig;
@@ -710,4 +713,11 @@ test "turn tcp client export is reachable" {
     }
     try std.testing.expect(accepted != null);
     accepted.?.deinit();
+}
+
+test "ice tcp action exports are reachable" {
+    const action = ice_tcp_action_for_local_role(.active);
+    try std.testing.expect(action.initiate_connect);
+    const pair = try ice_tcp_action_for_pair(.sim_open, .passive);
+    try std.testing.expect(pair.accept_incoming);
 }

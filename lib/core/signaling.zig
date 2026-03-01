@@ -126,3 +126,26 @@ test "apply remote description updates creds and dedupes candidates" {
     try std.testing.expectEqualStrings("ufragB", (&stream.remote_credentials.?).ufrag());
     try std.testing.expectEqual(@as(usize, 1), stream.remote_candidate_count(1));
 }
+
+test "apply remote description preserves tcp role" {
+    var stream = stream_mod.Stream.init(std.testing.allocator, 12);
+    defer stream.deinit();
+    try stream.add_component(1);
+
+    const addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 22 }, .port = 7000 } };
+    const remote_candidate = candidate.Candidate{
+        .id = 200,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .tcp,
+        .foundation = candidate.compute_foundation(.tcp, .host, addr),
+        .priority = candidate.compute_candidate_priority(.host, 30, 1),
+        .address = addr,
+        .tcp_role = .active,
+    };
+
+    const summary = try apply_remote_description(&stream, .{ .candidates = &[_]candidate.Candidate{remote_candidate} });
+    try std.testing.expectEqual(@as(usize, 1), summary.candidates_added);
+    const stored = stream.find_remote_candidate_by_id(200).?;
+    try std.testing.expectEqual(candidate.TcpRole.active, stored.tcp_role.?);
+}
