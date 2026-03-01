@@ -94,6 +94,8 @@ pub const stun_turn_build_refresh_request = @import("protocol/stun/usage_turn.zi
 pub const stun_turn_build_channel_bind_request = @import("protocol/stun/usage_turn.zig").build_channel_bind_request;
 pub const stun_turn_build_send_indication = @import("protocol/stun/usage_turn.zig").build_send_indication;
 pub const stun_turn_build_create_permission_request = @import("protocol/stun/usage_turn.zig").build_create_permission_request;
+pub const stun_turn_send_indication_type = @import("protocol/stun/usage_turn.zig").send_indication_type;
+pub const stun_turn_data_indication_type = @import("protocol/stun/usage_turn.zig").data_indication_type;
 pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
 pub const stun_turn_is_allocate_error_response = @import("protocol/stun/usage_turn.zig").is_allocate_error_response;
 pub const stun_turn_read_lifetime_seconds = @import("protocol/stun/usage_turn.zig").read_lifetime_seconds;
@@ -101,6 +103,8 @@ pub const stun_turn_read_requested_transport = @import("protocol/stun/usage_turn
 pub const stun_turn_read_error_code = @import("protocol/stun/usage_turn.zig").read_error_code;
 pub const stun_turn_parse_allocate_success_response = @import("protocol/stun/usage_turn.zig").parse_allocate_success_response;
 pub const stun_turn_parse_refresh_success_response = @import("protocol/stun/usage_turn.zig").parse_refresh_success_response;
+pub const stun_turn_is_data_indication = @import("protocol/stun/usage_turn.zig").is_data_indication;
+pub const stun_turn_parse_data_indication = @import("protocol/stun/usage_turn.zig").parse_data_indication;
 pub const stun_turn_read_channel_number = @import("protocol/stun/usage_turn.zig").read_channel_number;
 pub const stun_turn_read_data_attr = @import("protocol/stun/usage_turn.zig").read_data_attr;
 pub const stun_turn_count_xor_peer_addresses = @import("protocol/stun/usage_turn.zig").count_xor_peer_addresses;
@@ -601,6 +605,10 @@ test "stun turn usage exports are reachable" {
         .data = "x",
     });
     const send_view = try parse_stun_message(send_bytes);
+    try std.testing.expectEqual(@as(u16, 0x0016), stun_turn_send_indication_type);
+    try std.testing.expectEqual(@as(u16, 0x0017), stun_turn_data_indication_type);
+    try std.testing.expect(!stun_turn_is_data_indication(send_view));
+    try std.testing.expectError(error.NotDataIndication, stun_turn_parse_data_indication(send_view));
     try std.testing.expectEqualStrings("x", (try stun_turn_read_data_attr(send_view)).?);
 
     const peers = [_]StunAddress{peer};
