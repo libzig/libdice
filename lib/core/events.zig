@@ -12,16 +12,16 @@ pub const EventLoop = struct {
     pub fn init(allocator: std.mem.Allocator) EventLoop {
         return .{
             .allocator = allocator,
-            .queue = std.ArrayList(Task).init(allocator),
+            .queue = .empty,
         };
     }
 
     pub fn deinit(self: *EventLoop) void {
-        self.queue.deinit();
+        self.queue.deinit(self.allocator);
     }
 
     pub fn post(self: *EventLoop, task: Task) !void {
-        try self.queue.append(task);
+        try self.queue.append(self.allocator, task);
     }
 
     pub fn run_once(self: *EventLoop) bool {

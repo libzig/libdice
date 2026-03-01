@@ -4,12 +4,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const feature_options = b.addOptions();
+    feature_options.addOption(bool, "ice_udp", b.option(bool, "ice_udp", "Enable ICE over UDP") orelse true);
+    feature_options.addOption(bool, "ice_tcp", b.option(bool, "ice_tcp", "Enable ICE over TCP") orelse false);
+    feature_options.addOption(bool, "turn", b.option(bool, "turn", "Enable TURN support") orelse false);
+    feature_options.addOption(bool, "turn_tcp", b.option(bool, "turn_tcp", "Enable TURN over TCP support") orelse false);
+    feature_options.addOption(bool, "trickle", b.option(bool, "trickle", "Enable Trickle ICE support") orelse true);
+    feature_options.addOption(bool, "consent", b.option(bool, "consent", "Enable consent freshness checks") orelse false);
+    feature_options.addOption(bool, "reliable", b.option(bool, "reliable", "Enable reliable/bytestream mode") orelse false);
+    feature_options.addOption(bool, "upnp", b.option(bool, "upnp", "Enable UPnP integration") orelse false);
+
     // Create the libdice module
     const libdice_module = b.createModule(.{
         .root_source_file = b.path("lib/libdice.zig"),
         .target = target,
         .optimize = optimize,
     });
+    libdice_module.addOptions("build_options", feature_options);
 
     // Export the module so it can be used by other projects
     _ = b.addModule("libdice", .{
