@@ -75,6 +75,10 @@ fn find_attr_with_offset(view: parser.MessageView, attr_type: u16) parser.Parser
     return null;
 }
 
+pub fn has_attr(view: parser.MessageView, attr_type: u16) parser.ParserError!bool {
+    return (try find_attr_with_offset(view, attr_type)) != null;
+}
+
 fn compute_message_integrity_for_body_prefix(header: message.Header, body_prefix: []const u8, key: []const u8) hmac_sha1.Mac {
     var encoded_header: [message.header_size]u8 = undefined;
     const adjusted_header = message.Header.init(header.message_type, @intCast(body_prefix.len), header.transaction_id);

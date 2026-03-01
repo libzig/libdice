@@ -19,6 +19,11 @@ pub const stun_is_binding_response = @import("protocol/stun/usage_bind.zig").is_
 pub const stun_ice_add_priority = @import("protocol/stun/usage_ice.zig").add_priority;
 pub const stun_ice_add_use_candidate = @import("protocol/stun/usage_ice.zig").add_use_candidate;
 pub const stun_ice_has_use_candidate = @import("protocol/stun/usage_ice.zig").has_use_candidate;
+pub const stun_ice_build_connectivity_check_request = @import("protocol/stun/usage_ice.zig").build_connectivity_check_request;
+pub const stun_ice_build_connectivity_check_success_response = @import("protocol/stun/usage_ice.zig").build_connectivity_check_success_response;
+pub const stun_ice_parse_connectivity_check_request = @import("protocol/stun/usage_ice.zig").parse_connectivity_check_request;
+pub const stun_ice_is_connectivity_check_request = @import("protocol/stun/usage_ice.zig").is_connectivity_check_request;
+pub const stun_ice_is_connectivity_check_success_response = @import("protocol/stun/usage_ice.zig").is_connectivity_check_success_response;
 pub const stun_turn_build_allocate_request = @import("protocol/stun/usage_turn.zig").build_allocate_request;
 pub const stun_turn_build_refresh_request = @import("protocol/stun/usage_turn.zig").build_refresh_request;
 pub const stun_turn_is_allocate_success_response = @import("protocol/stun/usage_turn.zig").is_allocate_success_response;
@@ -155,15 +160,30 @@ test "stun bind usage exports are reachable" {
 
 test "stun ice usage exports are reachable" {
     const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-    var packet: [64]u8 = undefined;
+    var packet: [256]u8 = undefined;
 
-    var builder = try StunMessageBuilder.init(&packet, 0x0001, tx_id);
-    try stun_ice_add_priority(&builder, 10);
-    try stun_ice_add_use_candidate(&builder);
+    const request_bytes = try stun_ice_build_connectivity_check_request(&packet, tx_id, .{
+        .username = "local:remote",
+        .priority = 1234,
+        .role = .{ .role = .controlling, .tie_breaker = 42 },
+        .use_candidate = true,
+        .integrity_key = "pwd",
+        .include_fingerprint = true,
+    });
 
-    const bytes = try builder.finish();
-    const view = try parse_stun_message(bytes);
-    try std.testing.expect(try stun_ice_has_use_candidate(view));
+    const request_view = try parse_stun_message(request_bytes);
+    const request_info = try stun_ice_parse_connectivity_check_request(request_view, "pwd");
+    try std.testing.expect(stun_ice_is_connectivity_check_request(request_view));
+    try std.testing.expect(request_info.use_candidate);
+
+    const response_bytes = try stun_ice_build_connectivity_check_success_response(&packet, tx_id, .{
+        .software = "libdice-check",
+        .integrity_key = "pwd",
+        .include_fingerprint = true,
+    });
+
+    const response_view = try parse_stun_message(response_bytes);
+    try std.testing.expect(stun_ice_is_connectivity_check_success_response(response_view));
 }
 
 test "stun turn usage exports are reachable" {
