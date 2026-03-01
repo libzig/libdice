@@ -7,6 +7,7 @@ pub const TimerWheel = @import("core/timers.zig").TimerWheel;
 pub const TimerId = @import("core/timers.zig").TimerId;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
+pub const StunAddress = @import("protocol/stun/address_attrs.zig").StunAddress;
 pub const StunMessageView = @import("protocol/stun/parser.zig").MessageView;
 pub const parse_stun_message = @import("protocol/stun/parser.zig").parse_message;
 pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
@@ -14,6 +15,8 @@ pub const StunTransactionId = @import("protocol/stun/transaction.zig").Transacti
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
 pub const stun_build_binding_request = @import("protocol/stun/usage_bind.zig").build_binding_request;
+pub const stun_build_binding_success_response = @import("protocol/stun/usage_bind.zig").build_binding_success_response;
+pub const stun_parse_binding_response = @import("protocol/stun/usage_bind.zig").parse_binding_response;
 pub const stun_is_binding_request = @import("protocol/stun/usage_bind.zig").is_binding_request;
 pub const stun_is_binding_response = @import("protocol/stun/usage_bind.zig").is_binding_response;
 pub const stun_ice_add_priority = @import("protocol/stun/usage_ice.zig").add_priority;
@@ -150,12 +153,24 @@ test "stun integrity exports are reachable" {
 
 test "stun bind usage exports are reachable" {
     const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-    var packet: [64]u8 = undefined;
+    var packet: [256]u8 = undefined;
 
     const bytes = try stun_build_binding_request(&packet, tx_id, null, null);
     const view = try parse_stun_message(bytes);
     try std.testing.expect(stun_is_binding_request(view));
     try std.testing.expect(!stun_is_binding_response(view));
+
+    const mapped: StunAddress = .{ .ipv4 = .{ .port = 3333, .ip = .{ 198, 51, 100, 44 } } };
+    const response_bytes = try stun_build_binding_success_response(&packet, tx_id, .{
+        .xor_mapped_address = mapped,
+        .integrity_key = "bind-key",
+        .include_fingerprint = true,
+    });
+
+    const response_view = try parse_stun_message(response_bytes);
+    const parsed = try stun_parse_binding_response(response_view, "bind-key");
+    try std.testing.expect(stun_is_binding_response(response_view));
+    try std.testing.expectEqualDeep(mapped, parsed.xor_mapped_address.?);
 }
 
 test "stun ice usage exports are reachable" {
