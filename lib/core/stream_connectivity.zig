@@ -1,0 +1,255 @@
+const std = @import("std");
+const connectivity_engine = @import("connectivity_engine.zig");
+const checklist = @import("checklist.zig");
+const conncheck = @import("conncheck.zig");
+const component = @import("component.zig");
+const parser = @import("../protocol/stun/parser.zig");
+const transaction = @import("../protocol/stun/transaction.zig");
+
+pub const StartedCheck = struct {
+    component_id: u16,
+    transaction_id: transaction.TransactionId,
+};
+
+pub const TimedOutWithComponent = struct {
+    component_id: u16,
+    timed_out: conncheck.TimedOutCheck,
+};
+
+pub const StreamConnectivityRuntime = struct {
+    allocator: std.mem.Allocator,
+    stream_id: u32,
+    engines: std.ArrayList(connectivity_engine.ComponentConnectivityEngine),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        stream_id: u32,
+        component_ids: []const u16,
+        retry_policy: transaction.RetryPolicy,
+    ) !StreamConnectivityRuntime {
+        var engines = std.ArrayList(connectivity_engine.ComponentConnectivityEngine).empty;
+        errdefer {
+            for (engines.items) |*engine| engine.deinit();
+            engines.deinit(allocator);
+        }
+
+        for (component_ids) |component_id| {
+            try engines.append(allocator, connectivity_engine.ComponentConnectivityEngine.init(
+                allocator,
+                stream_id,
+                component_id,
+                retry_policy,
+            ));
+        }
+
+        return .{
+            .allocator = allocator,
+            .stream_id = stream_id,
+            .engines = engines,
+        };
+    }
+
+    pub fn deinit(self: *StreamConnectivityRuntime) void {
+        for (self.engines.items) |*engine| {
+            engine.deinit();
+        }
+        self.engines.deinit(self.allocator);
+    }
+
+    pub fn component_count(self: StreamConnectivityRuntime) usize {
+        return self.engines.items.len;
+    }
+
+    pub fn get_engine(self: *StreamConnectivityRuntime, component_id: u16) ?*connectivity_engine.ComponentConnectivityEngine {
+        for (self.engines.items) |*engine| {
+            if (engine.component.id == component_id) return engine;
+        }
+        return null;
+    }
+
+    pub fn add_pair(
+        self: *StreamConnectivityRuntime,
+        component_id: u16,
+        pair: checklist.Pair,
+        context: connectivity_engine.PairContext,
+    ) !void {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        try engine.add_pair(pair, context);
+    }
+
+    pub fn queue_triggered_pair(self: *StreamConnectivityRuntime, component_id: u16, pair_id: u64) !void {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        try engine.queue_triggered_pair(pair_id);
+    }
+
+    pub fn start_connecting_all(self: *StreamConnectivityRuntime) !void {
+        for (self.engines.items) |*engine| {
+            try engine.start_connecting();
+        }
+    }
+
+    pub fn start_next_check_for_component(
+        self: *StreamConnectivityRuntime,
+        component_id: u16,
+        random: std.Random,
+        now_ms: u64,
+    ) !?transaction.TransactionId {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        return engine.start_next_check(random, now_ms);
+    }
+
+    pub fn start_next_check_any(
+        self: *StreamConnectivityRuntime,
+        random: std.Random,
+        now_ms: u64,
+    ) !?StartedCheck {
+        for (self.engines.items) |*engine| {
+            const maybe_tx = try engine.start_next_check(random, now_ms);
+            if (maybe_tx) |tx_id| {
+                return .{
+                    .component_id = engine.component.id,
+                    .transaction_id = tx_id,
+                };
+            }
+        }
+
+        return null;
+    }
+
+    pub fn on_response(
+        self: *StreamConnectivityRuntime,
+        component_id: u16,
+        view: parser.MessageView,
+        now_ms: u64,
+    ) !conncheck.CompletedCheck {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        return engine.on_response(view, now_ms);
+    }
+
+    pub fn component_state(self: *StreamConnectivityRuntime, component_id: u16) !component.ComponentState {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        return engine.component.state;
+    }
+
+    pub fn expire_timeouts_all(self: *StreamConnectivityRuntime, now_ms: u64, out: []TimedOutWithComponent) !usize {
+        var written: usize = 0;
+
+        for (self.engines.items) |*engine| {
+            var local: [16]conncheck.TimedOutCheck = undefined;
+            const count = try engine.expire_timeouts(now_ms, &local);
+
+            for (local[0..@min(local.len, count)]) |timed_out| {
+                if (written < out.len) {
+                    out[written] = .{
+                        .component_id = engine.component.id,
+                        .timed_out = timed_out,
+                    };
+                }
+                written += 1;
+            }
+        }
+
+        return written;
+    }
+};
+
+test "stream connectivity runtime handles per-component checks" {
+    const component_ids = [_]u16{ 1, 2 };
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 10, &component_ids, .{});
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+
+    try runtime.add_pair(1, .{
+        .id = 101,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 100,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = true });
+
+    try runtime.add_pair(2, .{
+        .id = 201,
+        .local_candidate_id = 3,
+        .remote_candidate_id = 4,
+        .priority = 100,
+        .component_id = 2,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 3, .remote_candidate_id = 4, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(11);
+    const started_1 = (try runtime.start_next_check_for_component(1, prng.random(), 1000)).?;
+    const started_2 = (try runtime.start_next_check_for_component(2, prng.random(), 1000)).?;
+
+    var packet_1: [20]u8 = undefined;
+    const header_1 = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, started_1);
+    _ = try header_1.encode(&packet_1);
+    const view_1 = try parser.parse_message(&packet_1);
+    _ = try runtime.on_response(1, view_1, 1300);
+
+    var packet_2: [20]u8 = undefined;
+    const header_2 = @import("../protocol/stun/message.zig").Header.init(0x0111, 0, started_2);
+    _ = try header_2.encode(&packet_2);
+    const view_2 = try parser.parse_message(&packet_2);
+    _ = try runtime.on_response(2, view_2, 1300);
+
+    try std.testing.expectEqual(component.ComponentState.ready, try runtime.component_state(1));
+    try std.testing.expectEqual(component.ComponentState.failed, try runtime.component_state(2));
+}
+
+test "stream connectivity runtime start_next_check_any uses first available" {
+    const component_ids = [_]u16{ 1, 2 };
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 20, &component_ids, .{});
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+
+    try runtime.add_pair(2, .{
+        .id = 301,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 2,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(12);
+    const started = (try runtime.start_next_check_any(prng.random(), 0)).?;
+    try std.testing.expectEqual(@as(u16, 2), started.component_id);
+}
+
+test "stream connectivity runtime timeout aggregation" {
+    const component_ids = [_]u16{ 1, 2 };
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 30, &component_ids, .{ .base_rto_ms = 100, .max_retransmits = 1 });
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+
+    try runtime.add_pair(1, .{
+        .id = 401,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = 10,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 1, .remote_candidate_id = 2, .nominated = false });
+
+    try runtime.add_pair(2, .{
+        .id = 402,
+        .local_candidate_id = 3,
+        .remote_candidate_id = 4,
+        .priority = 10,
+        .component_id = 2,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 3, .remote_candidate_id = 4, .nominated = false });
+
+    var prng = std.Random.DefaultPrng.init(13);
+    _ = try runtime.start_next_check_for_component(1, prng.random(), 0);
+    _ = try runtime.start_next_check_for_component(2, prng.random(), 50);
+
+    var out: [8]TimedOutWithComponent = undefined;
+    const timed_out_count = try runtime.expire_timeouts_all(349, &out);
+    try std.testing.expectEqual(@as(usize, 1), timed_out_count);
+    try std.testing.expectEqual(@as(u16, 1), out[0].component_id);
+}

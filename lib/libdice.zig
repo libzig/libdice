@@ -11,6 +11,9 @@ pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCh
 pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
 pub const ComponentConnectivityEngine = @import("core/connectivity_engine.zig").ComponentConnectivityEngine;
 pub const ComponentPairContext = @import("core/connectivity_engine.zig").PairContext;
+pub const StreamConnectivityRuntime = @import("core/stream_connectivity.zig").StreamConnectivityRuntime;
+pub const StreamStartedCheck = @import("core/stream_connectivity.zig").StartedCheck;
+pub const TimedOutWithComponent = @import("core/stream_connectivity.zig").TimedOutWithComponent;
 pub const Checklist = @import("core/checklist.zig").Checklist;
 pub const ChecklistPair = @import("core/checklist.zig").Pair;
 pub const ChecklistPairState = @import("core/checklist.zig").PairState;
@@ -169,6 +172,31 @@ test "component connectivity engine export is reachable" {
     const view = try parse_stun_message(&packet);
     const completed = try engine.on_response(view, 10);
     try std.testing.expectEqual(@as(u64, 1), completed.meta.candidate_pair_id);
+}
+
+test "stream connectivity runtime export is reachable" {
+    const component_ids = [_]u16{ 1, 2 };
+    var runtime = try StreamConnectivityRuntime.init(std.testing.allocator, 1, &component_ids, StunRetryPolicy{});
+    defer runtime.deinit();
+
+    try runtime.start_connecting_all();
+    try runtime.add_pair(1, .{
+        .id = 1,
+        .local_candidate_id = 10,
+        .remote_candidate_id = 20,
+        .priority = 100,
+        .component_id = 1,
+        .state = .waiting,
+    }, .{ .local_candidate_id = 10, .remote_candidate_id = 20, .nominated = true });
+
+    var prng = std.Random.DefaultPrng.init(6);
+    const started: StreamStartedCheck = (try runtime.start_next_check_any(prng.random(), 0)).?;
+
+    var packet: [20]u8 = undefined;
+    const header = StunHeader.init(0x0101, 0, started.transaction_id);
+    _ = try header.encode(&packet);
+    const view = try parse_stun_message(&packet);
+    _ = try runtime.on_response(started.component_id, view, 20);
 }
 
 test "checklist exports are reachable" {
