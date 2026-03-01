@@ -9,6 +9,10 @@ pub const ConnectivityCheckTracker = @import("core/conncheck.zig").ConnectivityC
 pub const ConnectivityCheckMeta = @import("core/conncheck.zig").CheckMeta;
 pub const CompletedConnectivityCheck = @import("core/conncheck.zig").CompletedCheck;
 pub const TimedOutConnectivityCheck = @import("core/conncheck.zig").TimedOutCheck;
+pub const Checklist = @import("core/checklist.zig").Checklist;
+pub const ChecklistPair = @import("core/checklist.zig").Pair;
+pub const ChecklistPairState = @import("core/checklist.zig").PairState;
+pub const checklist_compute_pair_priority = @import("core/checklist.zig").compute_pair_priority;
 pub const StunHeader = @import("protocol/stun/message.zig").Header;
 pub const StunMessageClass = @import("protocol/stun/message.zig").MessageClass;
 pub const StunAttrHeader = @import("protocol/stun/attrs.zig").AttrHeader;
@@ -121,6 +125,24 @@ test "connectivity check tracker export is reachable" {
     const view = try parse_stun_message(&packet);
     const completed: CompletedConnectivityCheck = try tracker.on_response(view, 10);
     try std.testing.expectEqual(@as(u64, 1), completed.user_tag);
+}
+
+test "checklist exports are reachable" {
+    var checklist = Checklist.init(std.testing.allocator);
+    defer checklist.deinit();
+
+    const pair_priority = checklist_compute_pair_priority(true, 1000, 900);
+    try checklist.add_pair(.{
+        .id = 1,
+        .local_candidate_id = 1,
+        .remote_candidate_id = 2,
+        .priority = pair_priority,
+        .component_id = 1,
+        .state = .waiting,
+    });
+
+    const next: *ChecklistPair = checklist.pop_next_ordinary().?;
+    try std.testing.expectEqual(ChecklistPairState.in_progress, next.state);
 }
 
 test "stun header export is reachable" {
