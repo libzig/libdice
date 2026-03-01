@@ -13,6 +13,11 @@ pub const StunMessageBuilder = @import("protocol/stun/encoder.zig").Builder;
 pub const StunTransactionId = @import("protocol/stun/transaction.zig").TransactionId;
 pub const stun_tx_from_rng = @import("protocol/stun/transaction.zig").from_rng;
 pub const stun_tx_equals = @import("protocol/stun/transaction.zig").equals;
+pub const stun_message_integrity_type = @import("protocol/stun/integrity.zig").message_integrity_type;
+pub const stun_fingerprint_type = @import("protocol/stun/integrity.zig").fingerprint_type;
+pub const stun_compute_message_integrity = @import("protocol/stun/integrity.zig").compute_message_integrity;
+pub const stun_verify_message_integrity = @import("protocol/stun/integrity.zig").verify_message_integrity;
+pub const stun_compute_fingerprint = @import("protocol/stun/integrity.zig").compute_fingerprint;
 pub const HmacSha1Mac = @import("crypto/hmac_sha1.zig").Mac;
 pub const hmac_sha1_compute = @import("crypto/hmac_sha1.zig").compute;
 pub const hmac_sha1_verify = @import("crypto/hmac_sha1.zig").verify;
@@ -97,4 +102,14 @@ test "crypto exports are reachable" {
 
     const digest = md5_digest("message");
     try std.testing.expectEqual(@as(usize, 16), digest.len);
+}
+
+test "stun integrity exports are reachable" {
+    const mac = stun_compute_message_integrity("payload", "key");
+    try std.testing.expect(stun_verify_message_integrity(mac, "payload", "key"));
+
+    const fp = stun_compute_fingerprint("payload");
+    try std.testing.expect(fp != 0);
+    try std.testing.expectEqual(@as(u16, 0x0008), stun_message_integrity_type);
+    try std.testing.expectEqual(@as(u16, 0x8028), stun_fingerprint_type);
 }
