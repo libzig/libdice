@@ -844,6 +844,7 @@ pub const IceUdpRuntimeBridge = struct {
                     .integrity_key = options.integrity_key,
                     .include_fingerprint = options.include_fingerprint,
                 });
+                try binding.socket.note_permission_refresh_request(tx_id, peer, turn_socket_udp.TurnUdpSocket.permission_default_lifetime_seconds);
                 summary.permission_refreshes_sent += 1;
             }
 
@@ -860,6 +861,7 @@ pub const IceUdpRuntimeBridge = struct {
                     .integrity_key = options.integrity_key,
                     .include_fingerprint = options.include_fingerprint,
                 });
+                try binding.socket.note_channel_refresh_request(tx_id, entry.channel_number, entry.peer, turn_socket_udp.TurnUdpSocket.channel_default_lifetime_seconds);
                 summary.channel_refreshes_sent += 1;
             }
 
@@ -2273,4 +2275,72 @@ test "udp bridge applies TURN refresh success to allocation lease" {
     try std.testing.expect(binding.socket.allocation != null);
     try std.testing.expectEqual(@as(u32, 300), binding.socket.allocation.?.lifetime_seconds);
     try std.testing.expectEqual(@as(u64, 309_600), binding.socket.allocation.?.expires_at_ms);
+}
+
+test "udp bridge applies TURN permission and channel success responses" {
+    const message = @import("../protocol/stun/message.zig");
+
+    var turn_server = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer turn_server.deinit();
+    const turn_server_addr = try turn_server.local_address();
+
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+
+    var runtime = ice_runtime.IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_turn_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, turn_server_addr);
+
+    const binding = bridge.find_turn_binding(stream_id, 1).?;
+    const turn_client_addr = try binding.socket.local_address();
+    const peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 77 }, .port = 5000 } };
+    try binding.socket.set_permission(peer, 0, 10);
+    try binding.socket.set_channel_binding(0x4019, peer, 0, 10);
+
+    var prng = std.Random.DefaultPrng.init(51);
+    var packet_buf: [512]u8 = undefined;
+    const maintenance = try bridge.run_turn_maintenance(prng.random(), 9_500, &packet_buf, .{
+        .permission_refresh_margin_ms = 1_000,
+        .channel_refresh_margin_ms = 1_000,
+    });
+    try std.testing.expectEqual(@as(usize, 1), maintenance.permission_refreshes_sent);
+    try std.testing.expectEqual(@as(usize, 1), maintenance.channel_refreshes_sent);
+
+    var received_permission_tx: ?[12]u8 = null;
+    var received_channel_tx: ?[12]u8 = null;
+    var recv: [512]u8 = undefined;
+    var recv_count: usize = 0;
+    while (recv_count < 2) {
+        const got = try turn_server.recv_from(&recv);
+        const view = try parser.parse_message(recv[0..got.bytes]);
+        if (view.header.message_type == usage_turn.create_permission_request_type) {
+            received_permission_tx = view.header.transaction_id;
+            recv_count += 1;
+        } else if (view.header.message_type == usage_turn.channel_bind_request_type) {
+            received_channel_tx = view.header.transaction_id;
+            recv_count += 1;
+        }
+    }
+
+    var perm_ok: [20]u8 = undefined;
+    _ = try message.Header.init(usage_turn.create_permission_success_response_type, 0, received_permission_tx.?).encode(&perm_ok);
+    _ = try turn_server.send_to(turn_client_addr, &perm_ok);
+
+    var chan_ok: [20]u8 = undefined;
+    _ = try message.Header.init(usage_turn.channel_bind_success_response_type, 0, received_channel_tx.?).encode(&chan_ok);
+    _ = try turn_server.send_to(turn_client_addr, &chan_ok);
+
+    var recv_buf: [256]u8 = undefined;
+    var completed: [1]conncheck.CompletedCheck = undefined;
+    _ = try bridge.poll_until_idle(10_000, &recv_buf, &completed);
+
+    try std.testing.expectEqual(@as(usize, 1), binding.socket.permission_count());
+    try std.testing.expect(binding.socket.permissions.items[0].expires_at_ms > 10_000);
+    try std.testing.expectEqual(@as(usize, 1), binding.socket.channel_binding_count());
+    try std.testing.expect(binding.socket.channels.items[0].expires_at_ms > 10_000);
 }

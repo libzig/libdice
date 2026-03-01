@@ -52,15 +52,33 @@ pub const UdpRecvError = @typeInfo(@typeInfo(@TypeOf(udp_socket.UdpSocket.recv_f
 
 pub const TurnUdpSocketError = UdpRecvError || parser.ParserError || channel_data.ChannelDataError || usage_turn.TurnError || error{
     UnexpectedSource,
+    OutOfMemory,
 };
 
 pub const TurnUdpSocket = struct {
+    const PendingRefreshKind = enum {
+        permission,
+        channel,
+    };
+
+    const PendingRefresh = struct {
+        transaction_id: [12]u8,
+        kind: PendingRefreshKind,
+        peer: candidate.Address,
+        channel_number: u16,
+        lifetime_seconds: u32,
+    };
+
+    pub const permission_default_lifetime_seconds: u32 = 300;
+    pub const channel_default_lifetime_seconds: u32 = 600;
+
     allocator: std.mem.Allocator,
     socket: udp_socket.UdpSocket,
     server: candidate.Address,
     allocation: ?AllocationLease,
     permissions: std.ArrayList(Permission),
     channels: std.ArrayList(ChannelBinding),
+    pending_refreshes: std.ArrayList(PendingRefresh),
 
     pub fn init_nonblocking(allocator: std.mem.Allocator, local_bind: candidate.Address, server: candidate.Address) !TurnUdpSocket {
         return .{
@@ -70,10 +88,12 @@ pub const TurnUdpSocket = struct {
             .allocation = null,
             .permissions = .empty,
             .channels = .empty,
+            .pending_refreshes = .empty,
         };
     }
 
     pub fn deinit(self: *TurnUdpSocket) void {
+        self.pending_refreshes.deinit(self.allocator);
         self.permissions.deinit(self.allocator);
         self.channels.deinit(self.allocator);
         self.socket.deinit();
@@ -125,7 +145,73 @@ pub const TurnUdpSocket = struct {
             try self.on_refresh_success(view, now_ms, integrity_key);
             return true;
         }
+        if (view.header.message_type == usage_turn.create_permission_success_response_type) {
+            const handled = try self.on_permission_refresh_success(view.header.transaction_id, now_ms);
+            return handled;
+        }
+        if (view.header.message_type == usage_turn.channel_bind_success_response_type) {
+            const handled = try self.on_channel_bind_refresh_success(view.header.transaction_id, now_ms);
+            return handled;
+        }
         return false;
+    }
+
+    pub fn note_permission_refresh_request(
+        self: *TurnUdpSocket,
+        transaction_id: [12]u8,
+        peer: candidate.Address,
+        lifetime_seconds: u32,
+    ) !void {
+        try self.pending_refreshes.append(self.allocator, .{
+            .transaction_id = transaction_id,
+            .kind = .permission,
+            .peer = peer,
+            .channel_number = 0,
+            .lifetime_seconds = lifetime_seconds,
+        });
+    }
+
+    pub fn note_channel_refresh_request(
+        self: *TurnUdpSocket,
+        transaction_id: [12]u8,
+        channel_number: u16,
+        peer: candidate.Address,
+        lifetime_seconds: u32,
+    ) !void {
+        try self.pending_refreshes.append(self.allocator, .{
+            .transaction_id = transaction_id,
+            .kind = .channel,
+            .peer = peer,
+            .channel_number = channel_number,
+            .lifetime_seconds = lifetime_seconds,
+        });
+    }
+
+    fn on_permission_refresh_success(self: *TurnUdpSocket, transaction_id: [12]u8, now_ms: u64) !bool {
+        const pending = self.take_pending_refresh(transaction_id) orelse return false;
+        if (pending.kind != .permission) return false;
+        try self.set_permission(pending.peer, now_ms, pending.lifetime_seconds);
+        return true;
+    }
+
+    fn on_channel_bind_refresh_success(self: *TurnUdpSocket, transaction_id: [12]u8, now_ms: u64) !bool {
+        const pending = self.take_pending_refresh(transaction_id) orelse return false;
+        if (pending.kind != .channel) return false;
+        try self.set_channel_binding(pending.channel_number, pending.peer, now_ms, pending.lifetime_seconds);
+        return true;
+    }
+
+    fn take_pending_refresh(self: *TurnUdpSocket, transaction_id: [12]u8) ?PendingRefresh {
+        var i: usize = 0;
+        while (i < self.pending_refreshes.items.len) {
+            const item = self.pending_refreshes.items[i];
+            if (std.mem.eql(u8, &item.transaction_id, &transaction_id)) {
+                _ = self.pending_refreshes.swapRemove(i);
+                return item;
+            }
+            i += 1;
+        }
+        return null;
     }
 
     pub fn send_refresh_request(self: *TurnUdpSocket, packet_buf: []u8, transaction_id: [12]u8, lifetime_seconds: ?u32, nonce: ?[]const u8, realm: ?[]const u8, username: ?[]const u8) !usize {
@@ -393,6 +479,37 @@ test "turn udp socket refresh success updates allocation lease expiry" {
     try std.testing.expect(turn.allocation != null);
     try std.testing.expectEqual(@as(u32, 300), turn.allocation.?.lifetime_seconds);
     try std.testing.expectEqual(@as(u64, 302_000), turn.allocation.?.expires_at_ms);
+}
+
+test "turn udp socket applies permission and channel success responses" {
+    var turn = try TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 3478 } },
+    );
+    defer turn.deinit();
+
+    const peer: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 50 }, .port = 6000 } };
+
+    const tx_perm = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    try turn.note_permission_refresh_request(tx_perm, peer, 300);
+    var packet_perm: [64]u8 = undefined;
+    const perm_header = @import("../protocol/stun/message.zig").Header.init(usage_turn.create_permission_success_response_type, 0, tx_perm);
+    _ = try perm_header.encode(&packet_perm);
+    const perm_view = try parser.parse_message(packet_perm[0..20]);
+    try std.testing.expect(try turn.on_server_stun(perm_view, 5_000, null));
+    try std.testing.expectEqual(@as(usize, 1), turn.permission_count());
+    try std.testing.expectEqual(@as(u64, 305_000), turn.permissions.items[0].expires_at_ms);
+
+    const tx_channel = [_]u8{ 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
+    try turn.note_channel_refresh_request(tx_channel, 0x4011, peer, 600);
+    var packet_channel: [64]u8 = undefined;
+    const channel_header = @import("../protocol/stun/message.zig").Header.init(usage_turn.channel_bind_success_response_type, 0, tx_channel);
+    _ = try channel_header.encode(&packet_channel);
+    const channel_view = try parser.parse_message(packet_channel[0..20]);
+    try std.testing.expect(try turn.on_server_stun(channel_view, 8_000, null));
+    try std.testing.expectEqual(@as(usize, 1), turn.channel_binding_count());
+    try std.testing.expectEqual(@as(u64, 608_000), turn.channels.items[0].expires_at_ms);
 }
 
 test "turn udp socket sends and decodes channel data" {

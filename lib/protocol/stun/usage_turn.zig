@@ -15,6 +15,10 @@ pub const refresh_error_response_type: u16 = 0x0114;
 pub const create_permission_request_type: u16 = 0x0008;
 pub const create_permission_success_response_type: u16 = 0x0108;
 pub const create_permission_error_response_type: u16 = 0x0118;
+
+pub const channel_bind_request_type: u16 = 0x0009;
+pub const channel_bind_success_response_type: u16 = 0x0109;
+pub const channel_bind_error_response_type: u16 = 0x0119;
 pub const send_indication_type: u16 = 0x0016;
 pub const data_indication_type: u16 = 0x0017;
 
@@ -155,7 +159,7 @@ pub fn build_refresh_request(buffer: []u8, transaction_id: [12]u8, lifetime_seco
 }
 
 pub fn build_channel_bind_request(buffer: []u8, transaction_id: [12]u8, options: ChannelBindRequestOptions) encoder.EncodeError![]const u8 {
-    var builder = try encoder.Builder.init(buffer, 0x0009, transaction_id);
+    var builder = try encoder.Builder.init(buffer, channel_bind_request_type, transaction_id);
 
     var ch_number: [4]u8 = .{ 0, 0, 0, 0 };
     std.mem.writeInt(u16, ch_number[0..2], options.channel_number, .big);
