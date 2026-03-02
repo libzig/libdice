@@ -228,4 +228,18 @@ pub fn build(b: *std.Build) void {
     }
     const ice_demo_selector_step = b.step("run-ice-demo", "Run ICE demo selector (pump|timeout)");
     ice_demo_selector_step.dependOn(&run_ice_demo_selector.step);
+
+    const run_ice_demo_pump_summary = b.addRunArtifact(ice_demo_selector);
+    run_ice_demo_pump_summary.addArgs(&.{ "pump", "--summary" });
+
+    const run_ice_demo_timeout_summary = b.addRunArtifact(ice_demo_selector);
+    run_ice_demo_timeout_summary.addArgs(&.{ "timeout", "--summary" });
+
+    const run_ice_demo_drive_summary = b.addRunArtifact(ice_demo_selector);
+    run_ice_demo_drive_summary.addArgs(&.{ "drive", "--summary" });
+
+    const examples_smoke_step = b.step("test-examples-smoke", "Run nonblocking example smoke scenarios");
+    examples_smoke_step.dependOn(&run_ice_demo_pump_summary.step);
+    examples_smoke_step.dependOn(&run_ice_demo_timeout_summary.step);
+    examples_smoke_step.dependOn(&run_ice_demo_drive_summary.step);
 }

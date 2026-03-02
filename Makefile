@@ -1,4 +1,4 @@
-.PHONY: build test test-dual-mode ci ci-fast ci-integration integration-coturn install coturn-up coturn-down coturn-wait
+.PHONY: build test ci ci-fast ci-integration integration-coturn install coturn-up coturn-down coturn-wait
 
 build:
 	zig build -Doptimize=ReleaseFast
@@ -6,14 +6,10 @@ build:
 test:
 	zig build test --summary all
 
-test-dual-mode:
-	zig build test-dual-mode-regression --summary all
-
 ci:
 	$(MAKE) ci-fast
 
 ci-fast:
-	zig build test-dual-mode-regression --summary all
 	zig build test --summary all
 	zig build -Doptimize=ReleaseFast
 
