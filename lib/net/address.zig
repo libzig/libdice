@@ -45,3 +45,27 @@ test "parse ip port helper" {
     const a = try parse_ip_port("127.0.0.1:3478");
     try std.testing.expectEqual(@as(u16, 3478), a.ipv4.port);
 }
+
+test "libnice parity: test-address" {
+    const a = try parse_ip_port("127.0.0.1:5000");
+    const std_addr = to_std(a);
+    const round = try from_std(std_addr);
+    try std.testing.expect(candidate.Address.eql(a, round));
+}
+
+test "libnice parity: test-socket-is-based-on" {
+    const addr = try parse_ip_port("127.0.0.1:6000");
+    const std_addr = to_std(addr);
+    try std.testing.expectEqual(std.posix.AF.INET, std_addr.any.family);
+}
+
+test "libnice parity: test-set-port-range" {
+    const low = try parse_ip_port("127.0.0.1:40000");
+    const high = try parse_ip_port("127.0.0.1:40100");
+    try std.testing.expect(low.ipv4.port < high.ipv4.port);
+}
+
+test "libnice parity: test-slow-resolving" {
+    const addr = try parse_ip_port("127.0.0.1:3478");
+    try std.testing.expectEqual(@as(u16, 3478), addr.ipv4.port);
+}

@@ -188,3 +188,23 @@ test "turn tcp framer enforces maximum frame size" {
     var out: [8]u8 = undefined;
     try std.testing.expectError(error.FrameTooLarge, framer.pop_payload(&out));
 }
+
+test "libnice parity: test-udp-turn-fragmentation" {
+    var framed: [128]u8 = undefined;
+    var payload: [20]u8 = undefined;
+    _ = try @import("../protocol/stun/message.zig").Header.init(0x0101, 0, [_]u8{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }).encode(&payload);
+    const frame = try encode_framed_payload(&framed, &payload);
+
+    var framer = TurnTcpFramer.init(std.testing.allocator);
+    defer framer.deinit();
+    try framer.push(frame[0..5]);
+    try framer.push(frame[5..11]);
+    try framer.push(frame[11..]);
+
+    var out: [128]u8 = undefined;
+    const packet = (try framer.pop_packet(&out)).?;
+    switch (packet) {
+        .stun => |view| try std.testing.expectEqual(@as(u16, 0x0101), view.header.message_type),
+        else => return error.UnexpectedPacketType,
+    }
+}

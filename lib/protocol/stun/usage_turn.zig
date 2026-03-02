@@ -639,3 +639,31 @@ test "parse TURN data indication with xor peer and data" {
     try std.testing.expectEqualDeep(peer, parsed.peer_address);
     try std.testing.expectEqualStrings("relay-payload", parsed.data);
 }
+
+test "libnice parity: test-turn" {
+    const tx = [_]u8{ 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7 };
+    var packet: [512]u8 = undefined;
+
+    const allocate = try build_allocate_request(&packet, tx, .{
+        .username = "u",
+        .realm = "r",
+        .nonce = "n",
+        .lifetime_seconds = 300,
+        .integrity_key = "k",
+        .include_fingerprint = true,
+    });
+    const allocate_view = try parser.parse_message(allocate);
+    try std.testing.expectEqual(@as(?u32, 300), try read_lifetime_seconds(allocate_view));
+
+    const peer: address_attrs.StunAddress = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 9 }, .port = 7777 } };
+    const permission = try build_create_permission_request(&packet, tx, .{
+        .peer_addresses = &[_]address_attrs.StunAddress{peer},
+        .username = "u",
+        .realm = "r",
+        .nonce = "n",
+        .integrity_key = "k",
+        .include_fingerprint = true,
+    });
+    const permission_view = try parser.parse_message(permission);
+    try std.testing.expectEqual(@as(usize, 1), try count_xor_peer_addresses(permission_view));
+}

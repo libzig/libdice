@@ -79,6 +79,11 @@ test "parse message with two attributes" {
     try std.testing.expectEqual(@as(?AttrView, null), try it.next());
 }
 
+test "libnice parity: test-drop-invalid" {
+    var short: [8]u8 = [_]u8{0} ** 8;
+    try std.testing.expectError(error.BufferTooShort, parse_message(&short));
+}
+
 test "parse_message rejects truncated body" {
     const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
     var packet: [message.header_size]u8 = undefined;

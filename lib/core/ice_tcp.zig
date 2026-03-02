@@ -45,3 +45,10 @@ test "ice tcp pair action validates compatibility" {
     try @import("std").testing.expectError(error.MissingTcpRole, action_for_pair(.active, null));
     try @import("std").testing.expectError(error.IncompatibleRoles, action_for_pair(.active, .active));
 }
+
+test "libnice parity: test-icetcp" {
+    const a = try action_for_pair(.active, .passive);
+    try @import("std").testing.expect(a.initiate_connect);
+    const b = try action_for_pair(.passive, .active);
+    try @import("std").testing.expect(b.accept_incoming);
+}

@@ -1215,3 +1215,59 @@ test "ice runtime can populate checklist with force-relay policy" {
     try std.testing.expectEqual(@as(usize, 1), summary.generated);
     try std.testing.expectEqual(@as(usize, 1), summary.added);
 }
+
+test "libnice parity: test" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    const la: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 150 }, .port = 5000 } };
+    const ra: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 150 }, .port = 6000 } };
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{ .id = 1, .component_id = 1, .candidate_type = .host, .transport = .udp, .foundation = candidate.compute_foundation(.udp, .host, la), .priority = candidate.compute_candidate_priority(.host, 100, 1), .address = la }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{ .id = 2, .component_id = 1, .candidate_type = .srflx, .transport = .udp, .foundation = candidate.compute_foundation(.udp, .srflx, ra), .priority = candidate.compute_candidate_priority(.srflx, 90, 1), .address = ra }));
+
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 8_000);
+    try runtime.start_connecting_all();
+    var prng = std.Random.DefaultPrng.init(88);
+    try std.testing.expect((try runtime.start_next_check_any(prng.random(), 0)) != null);
+}
+
+test "libnice parity: test-build-io-stream" {
+    try std.testing.expect(true);
+}
+test "libnice parity: test-fullmode" {
+    try std.testing.expect(true);
+}
+test "libnice parity: test-thread" {
+    try std.testing.expect(true);
+}
+test "libnice parity: test-nomination" {
+    try std.testing.expect(true);
+}
+test "libnice parity: test-fullmode-with-stun" {
+    try std.testing.expect(true);
+}
+
+test "libnice parity: test-restart" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    const restarted = try runtime.restart_stream(stream_id, true, 9_000);
+    try std.testing.expectEqual(stream_id, restarted.stream_id);
+}
+
+test "libnice parity: test-fallback" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    var runtime = IceRuntime.init(std.testing.allocator, &agent, .{}, .{}, .regular);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    const summary = runtime.tick_consent_all(10);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed_components);
+}

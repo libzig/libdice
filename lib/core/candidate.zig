@@ -179,6 +179,14 @@ test "candidate priority ordering by type preference" {
     try std.testing.expect(srflx > relay);
 }
 
+test "libnice parity: test-priority" {
+    const host = compute_candidate_priority(.host, 120, 1);
+    const srflx = compute_candidate_priority(.srflx, 120, 1);
+    const relay = compute_candidate_priority(.relay, 120, 1);
+    try std.testing.expect(host > srflx);
+    try std.testing.expect(srflx > relay);
+}
+
 test "foundation is stable for same tuple" {
     const address: Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 10 }, .port = 5000 } };
     const a = compute_foundation(.udp, .host, address);
