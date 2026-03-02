@@ -1,5 +1,11 @@
 const std = @import("std");
 
+// Public API note:
+// - This file is the public entrypoint for downstream users.
+// - The recommended integration path is Agent + IceRuntime + IceUdpRuntimeBridge
+//   and signaling helpers such as build_local_description/apply_remote_description.
+// - Use api_version/is_api_compatible for compatibility checks across upgrades.
+
 pub const EventLoop = @import("core/events.zig").EventLoop;
 pub const EventTask = @import("core/events.zig").Task;
 pub const FeatureFlags = @import("core/feature_flags.zig").FeatureFlags;
