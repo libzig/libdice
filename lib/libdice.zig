@@ -5,6 +5,8 @@ const std = @import("std");
 // - The recommended integration path is Agent + IceRuntime + IceUdpRuntimeBridge
 //   and signaling helpers such as build_local_description/apply_remote_description.
 // - Use api_version/is_api_compatible for compatibility checks across upgrades.
+// - Low-level scheduler/engine/protocol exports remain available, but are considered
+//   advanced surface and may evolve faster than the recommended integration path.
 
 pub const EventLoop = @import("core/events.zig").EventLoop;
 pub const EventTask = @import("core/events.zig").Task;
@@ -218,6 +220,17 @@ pub fn is_api_compatible(expected_major: u16) bool {
     return expected_major == api_version.major;
 }
 
+pub fn recommended_entrypoints() []const []const u8 {
+    return &.{
+        "Agent",
+        "IceRuntime",
+        "IceUdpRuntimeBridge",
+        "build_local_description",
+        "apply_remote_description",
+        "loopback_populate_checklists_both",
+    };
+}
+
 pub fn active_feature_flags() FeatureFlags {
     return FeatureFlags.from_build_options();
 }
@@ -244,6 +257,13 @@ test "api version exports are reachable" {
     try std.testing.expectEqualStrings("0.1.0-dev", api_version_string());
     try std.testing.expect(is_api_compatible(0));
     try std.testing.expect(!is_api_compatible(1));
+}
+
+test "recommended entrypoints metadata is exposed" {
+    const names = recommended_entrypoints();
+    try std.testing.expect(names.len >= 6);
+    try std.testing.expectEqualStrings("Agent", names[0]);
+    try std.testing.expectEqualStrings("IceRuntime", names[1]);
 }
 
 test "active feature flags are accessible" {
