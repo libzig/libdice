@@ -2049,7 +2049,8 @@ test "udp bridge io tick transitions component to failed on missed consent" {
     // Consume consent probe on peer but intentionally do not respond.
     _ = try peer.recv_from(&request_buf);
 
-    const failure_tick = try bridge.run_io_tick(
+    var events: [16]ice_runtime.IceEvent = undefined;
+    const failure_tick = try bridge.run_io_tick_with_events(
         prng.random(),
         17,
         &outbound_packet_buf,
@@ -2057,9 +2058,20 @@ test "udp bridge io tick transitions component to failed on missed consent" {
         &send_buf,
         &completed,
         &timed_out,
+        &events,
         .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 400, .role = .{ .role = .controlling, .tie_breaker = 11 } } },
     );
-    try std.testing.expectEqual(@as(usize, 1), failure_tick.advance.failed_consents);
+    try std.testing.expectEqual(@as(usize, 1), failure_tick.io.advance.failed_consents);
+    try std.testing.expect(failure_tick.events_drained >= 1);
+
+    var saw_consent_failed = false;
+    for (events[0..@min(events.len, failure_tick.events_drained)]) |event| {
+        switch (event.event.event) {
+            .consent_failed => saw_consent_failed = true,
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_consent_failed);
     try std.testing.expectEqual(@as(usize, 1), runtime.stats().failed_components);
 }
 
