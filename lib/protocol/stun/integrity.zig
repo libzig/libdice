@@ -2,6 +2,7 @@ const std = @import("std");
 const message = @import("message.zig");
 const encoder = @import("encoder.zig");
 const parser = @import("parser.zig");
+const attrs = @import("attrs.zig");
 const hmac_sha1 = @import("../../crypto/hmac_sha1.zig");
 
 pub const message_integrity_type: u16 = 0x0008;
@@ -45,16 +46,36 @@ pub fn read_fingerprint_be(in: []const u8) error{BufferTooSmall}!u32 {
 }
 
 pub fn add_message_integrity_attr(builder: *encoder.Builder, key: []const u8) encoder.EncodeError!void {
-    const prefix = try builder.finish();
-    const mac = compute_message_integrity(prefix, key);
+    const body_len_before = builder.write_index - message.header_size;
+    const message_len_with_integrity = body_len_before + attrs.attr_header_size + message_integrity_size;
+
+    var encoded_header: [message.header_size]u8 = undefined;
+    const adjusted_header = message.Header.init(builder.header.message_type, @intCast(message_len_with_integrity), builder.header.transaction_id);
+    _ = adjusted_header.encode(&encoded_header) catch return error.BufferTooSmall;
+
+    var mac: hmac_sha1.Mac = undefined;
+    var hmac_ctx = std.crypto.auth.hmac.HmacSha1.init(key);
+    hmac_ctx.update(&encoded_header);
+    hmac_ctx.update(builder.buffer[message.header_size..builder.write_index]);
+    hmac_ctx.final(&mac);
+
     try builder.add_attr(message_integrity_type, &mac);
 }
 
 pub fn add_fingerprint_attr(builder: *encoder.Builder) encoder.EncodeError!void {
-    const prefix = try builder.finish();
+    const body_len_before = builder.write_index - message.header_size;
+    const message_len_with_fingerprint = body_len_before + attrs.attr_header_size + fingerprint_size;
+
+    var encoded_header: [message.header_size]u8 = undefined;
+    const adjusted_header = message.Header.init(builder.header.message_type, @intCast(message_len_with_fingerprint), builder.header.transaction_id);
+    _ = adjusted_header.encode(&encoded_header) catch return error.BufferTooSmall;
+
+    var crc = std.hash.Crc32.init();
+    crc.update(&encoded_header);
+    crc.update(builder.buffer[message.header_size..builder.write_index]);
 
     var value: [4]u8 = undefined;
-    std.mem.writeInt(u32, &value, compute_fingerprint(prefix), .big);
+    std.mem.writeInt(u32, &value, crc.final() ^ fingerprint_xor, .big);
     try builder.add_attr(fingerprint_type, &value);
 }
 
@@ -81,7 +102,8 @@ pub fn has_attr(view: parser.MessageView, attr_type: u16) parser.ParserError!boo
 
 fn compute_message_integrity_for_body_prefix(header: message.Header, body_prefix: []const u8, key: []const u8) hmac_sha1.Mac {
     var encoded_header: [message.header_size]u8 = undefined;
-    const adjusted_header = message.Header.init(header.message_type, @intCast(body_prefix.len), header.transaction_id);
+    const message_len_with_integrity = body_prefix.len + attrs.attr_header_size + message_integrity_size;
+    const adjusted_header = message.Header.init(header.message_type, @intCast(message_len_with_integrity), header.transaction_id);
     _ = adjusted_header.encode(&encoded_header) catch unreachable;
 
     var mac: hmac_sha1.Mac = undefined;
@@ -94,7 +116,8 @@ fn compute_message_integrity_for_body_prefix(header: message.Header, body_prefix
 
 fn compute_fingerprint_for_body_prefix(header: message.Header, body_prefix: []const u8) u32 {
     var encoded_header: [message.header_size]u8 = undefined;
-    const adjusted_header = message.Header.init(header.message_type, @intCast(body_prefix.len), header.transaction_id);
+    const message_len_with_fingerprint = body_prefix.len + attrs.attr_header_size + fingerprint_size;
+    const adjusted_header = message.Header.init(header.message_type, @intCast(message_len_with_fingerprint), header.transaction_id);
     _ = adjusted_header.encode(&encoded_header) catch unreachable;
 
     var crc = std.hash.Crc32.init();
