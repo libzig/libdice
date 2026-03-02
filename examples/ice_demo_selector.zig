@@ -2,9 +2,10 @@ const std = @import("std");
 const pump_demo = @import("ice_pump_demo.zig");
 const timeout_demo = @import("ice_timeout_demo.zig");
 const drive_demo = @import("ice_drive_demo.zig");
+const sdp_demo = @import("sdp_example.zig");
 
 fn print_usage(argv0: []const u8) void {
-    std.debug.print("usage: {s} <pump|timeout|drive> [--summary]\n", .{argv0});
+    std.debug.print("usage: {s} <pump|timeout|drive|sdp> [--summary]\n", .{argv0});
 }
 
 pub fn main() !void {
@@ -53,6 +54,15 @@ pub fn main() !void {
             try drive_demo.run_summary();
         } else {
             try drive_demo.run();
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, mode, "sdp")) {
+        if (summary) {
+            try sdp_demo.run_summary();
+        } else {
+            try sdp_demo.run();
         }
         return;
     }
