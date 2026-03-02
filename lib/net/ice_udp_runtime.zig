@@ -2256,6 +2256,114 @@ test "udp bridge drive loop reaches deadline when checks remain pending" {
     try std.testing.expect(loop.final_pending_transactions > 0);
 }
 
+test "udp bridge drive loop reports non-zero consent probe and response totals" {
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 247 }, .port = 5000 } };
+    var peer = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer peer.deinit();
+    const peer_addr = try peer.local_address();
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 131,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 132,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, peer_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = peer_addr,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(
+        std.testing.allocator,
+        &agent,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 1 },
+        .regular,
+    );
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 12_000);
+    try runtime.start_connecting_all();
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+
+    var prng = std.Random.DefaultPrng.init(70);
+    var outbound_buf: [256]u8 = undefined;
+    var recv_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var completed: [4]conncheck.CompletedCheck = undefined;
+    var timed_out: [2]ice_runtime.TimedOutCheck = undefined;
+    var events: [16]ice_runtime.IceEvent = undefined;
+
+    const started = (try bridge.start_and_send_next_check(prng.random(), 0, &outbound_buf, .{
+        .username = "l:r",
+        .priority = 500,
+        .role = .{ .role = .controlling, .tie_breaker = 13 },
+    })).?;
+
+    var request_buf: [256]u8 = undefined;
+    const initial_recv = try peer.recv_from(&request_buf);
+    const initial_view = try parser.parse_message(request_buf[0..initial_recv.bytes]);
+    try std.testing.expect(usage_ice.is_connectivity_check_request(initial_view));
+
+    var response_buf: [256]u8 = undefined;
+    const initial_ok = try usage_ice.build_connectivity_check_success_response(&response_buf, started.started.transaction_id, .{});
+    _ = try peer.send_to(initial_recv.from, initial_ok);
+
+    _ = try bridge.advance_bidirectional(2, &recv_buf, &send_buf, &completed, &timed_out, .{});
+    try std.testing.expectEqual(@as(usize, 1), runtime.stats().ready_components);
+
+    const first_loop = try bridge.run_until_quiescent_or_deadline(
+        prng.random(),
+        12,
+        12,
+        1,
+        &outbound_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        &events,
+        .{ .io_tick = .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 500, .role = .{ .role = .controlling, .tie_breaker = 13 } } }, .stop_on_quiescent = false, .max_ticks = 1 },
+    );
+    try std.testing.expect(first_loop.total_consent_probes_sent > 0);
+
+    const consent_recv = try peer.recv_from(&request_buf);
+    const consent_req = try parser.parse_message(request_buf[0..consent_recv.bytes]);
+    try std.testing.expect(usage_ice.is_connectivity_check_request(consent_req));
+    const consent_ok = try usage_ice.build_connectivity_check_success_response(&response_buf, consent_req.header.transaction_id, .{});
+    _ = try peer.send_to(consent_recv.from, consent_ok);
+
+    const second_loop = try bridge.run_until_quiescent_or_deadline(
+        prng.random(),
+        13,
+        13,
+        1,
+        &outbound_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        &events,
+        .{ .io_tick = .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 500, .role = .{ .role = .controlling, .tie_breaker = 13 } } }, .stop_on_quiescent = false, .max_ticks = 1 },
+    );
+    try std.testing.expect(second_loop.total_consent_responses > 0);
+}
+
 test "udp bridge io tick with events drains started-check event" {
     var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
     defer agent.deinit();
