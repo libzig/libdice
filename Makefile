@@ -1,4 +1,4 @@
-.PHONY: build test test-dual-mode ci install
+.PHONY: build test test-dual-mode ci install coturn-up coturn-down coturn-wait
 
 build:
 	zig build -Doptimize=ReleaseFast
@@ -16,6 +16,15 @@ ci:
 
 install: build
 	install -Dm644 "./zig-out/lib/libdice.a" "$(HOME)/.local/lib/libdice.a"
+
+coturn-up:
+	bash "./scripts/coturn_up.sh"
+
+coturn-down:
+	bash "./scripts/coturn_down.sh"
+
+coturn-wait:
+	bash "./scripts/coturn_wait.sh"
 
 # Release
 # ==================================================================================================
