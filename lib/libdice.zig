@@ -190,6 +190,28 @@ pub const IceUdpDriveLoopSummary = @import("net/ice_udp_runtime.zig").DriveLoopS
 
 pub const version = "0.0.1";
 
+pub const ApiVersion = struct {
+    major: u16,
+    minor: u16,
+    patch: u16,
+    prerelease: ?[]const u8 = null,
+};
+
+pub const api_version = ApiVersion{
+    .major = 0,
+    .minor = 1,
+    .patch = 0,
+    .prerelease = "dev",
+};
+
+pub fn api_version_string() []const u8 {
+    return "0.1.0-dev";
+}
+
+pub fn is_api_compatible(expected_major: u16) bool {
+    return expected_major == api_version.major;
+}
+
 pub fn active_feature_flags() FeatureFlags {
     return FeatureFlags.from_build_options();
 }
@@ -208,6 +230,14 @@ test "exports are reachable" {
     flags.ice_udp = false;
     try std.testing.expect(!flags.ice_udp);
     try std.testing.expectEqualStrings("0.0.1", version);
+}
+
+test "api version exports are reachable" {
+    try std.testing.expectEqual(@as(u16, 0), api_version.major);
+    try std.testing.expectEqual(@as(u16, 1), api_version.minor);
+    try std.testing.expectEqualStrings("0.1.0-dev", api_version_string());
+    try std.testing.expect(is_api_compatible(0));
+    try std.testing.expect(!is_api_compatible(1));
 }
 
 test "active feature flags are accessible" {
