@@ -64,6 +64,22 @@ pub fn build(b: *std.Build) void {
     const dual_mode_step = b.step("test-dual-mode-regression", "Run bootstrap regression tests");
     dual_mode_step.dependOn(&run_dual_mode_tests.step);
 
+    // Optional coturn integration smoke test (requires running coturn)
+    const coturn_integration_module = b.createModule(.{
+        .root_source_file = b.path("lib/integration/coturn_smoke_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    coturn_integration_module.addImport("libdice", libdice_module);
+
+    const coturn_integration_tests = b.addTest(.{
+        .root_module = coturn_integration_module,
+    });
+    const run_coturn_integration = b.addRunArtifact(coturn_integration_tests);
+
+    const coturn_integration_step = b.step("test-coturn-integration", "Run coturn integration smoke test");
+    coturn_integration_step.dependOn(&run_coturn_integration.step);
+
     // Examples
 
     // Smoke server A

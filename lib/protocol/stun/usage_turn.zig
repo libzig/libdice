@@ -54,6 +54,8 @@ pub const AllocateRequestOptions = struct {
     software: ?[]const u8 = null,
     lifetime_seconds: ?u32 = null,
     requested_transport: u8 = requested_transport_udp,
+    integrity_key: ?[]const u8 = null,
+    include_fingerprint: bool = false,
 };
 
 pub const AllocateSuccessResponseInfo = struct {
@@ -129,6 +131,14 @@ pub fn build_allocate_request(buffer: []u8, transaction_id: [12]u8, options: All
         var lifetime_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &lifetime_buf, lifetime, .big);
         try builder.add_attr(lifetime_attr_type, &lifetime_buf);
+    }
+
+    if (options.integrity_key) |key| {
+        try integrity.add_message_integrity_attr(&builder, key);
+    }
+
+    if (options.include_fingerprint) {
+        try integrity.add_fingerprint_attr(&builder);
     }
 
     return builder.finish();
@@ -400,6 +410,23 @@ test "build allocate request with common TURN attributes" {
 
     const lifetime = (try read_lifetime_seconds(view)).?;
     try std.testing.expectEqual(@as(u32, 600), lifetime);
+}
+
+test "build allocate request can include integrity and fingerprint" {
+    const tx_id = [_]u8{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    var packet: [256]u8 = undefined;
+
+    const bytes = try build_allocate_request(&packet, tx_id, .{
+        .username = "user",
+        .realm = "example.org",
+        .nonce = "nonce",
+        .integrity_key = "turn-key",
+        .include_fingerprint = true,
+    });
+
+    const view = try parser.parse_message(bytes);
+    try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+    try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
 }
 
 test "build refresh request with optional attributes" {

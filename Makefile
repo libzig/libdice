@@ -1,4 +1,4 @@
-.PHONY: build test test-dual-mode ci install coturn-up coturn-down coturn-wait
+.PHONY: build test test-dual-mode ci ci-fast ci-integration integration-coturn install coturn-up coturn-down coturn-wait
 
 build:
 	zig build -Doptimize=ReleaseFast
@@ -10,9 +10,18 @@ test-dual-mode:
 	zig build test-dual-mode-regression --summary all
 
 ci:
+	$(MAKE) ci-fast
+
+ci-fast:
 	zig build test-dual-mode-regression --summary all
 	zig build test --summary all
 	zig build -Doptimize=ReleaseFast
+
+ci-integration:
+	$(MAKE) integration-coturn
+
+integration-coturn: coturn-up coturn-wait
+	zig build test-coturn-integration
 
 install: build
 	install -Dm644 "./zig-out/lib/libdice.a" "$(HOME)/.local/lib/libdice.a"
