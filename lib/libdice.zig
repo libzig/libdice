@@ -212,21 +212,6 @@ pub fn is_api_compatible(expected_major: u16) bool {
     return expected_major == api_version.major;
 }
 
-pub const StableApi = struct {
-    pub const AgentType = Agent;
-    pub const RuntimeType = IceRuntime;
-    pub const UdpBridgeType = IceUdpRuntimeBridge;
-    pub const CandidateType = Candidate;
-    pub const CandidateAddressType = CandidateAddress;
-    pub const StreamDescriptionType = StreamDescription;
-    pub const RemoteDescriptionType = RemoteDescription;
-
-    pub const build_local_description_fn = build_local_description;
-    pub const apply_remote_description_fn = apply_remote_description;
-    pub const exchange_descriptions_fn = loopback_exchange_descriptions_via_text;
-    pub const populate_checklists_both_fn = loopback_populate_checklists_both;
-};
-
 pub fn active_feature_flags() FeatureFlags {
     return FeatureFlags.from_build_options();
 }
@@ -253,18 +238,6 @@ test "api version exports are reachable" {
     try std.testing.expectEqualStrings("0.1.0-dev", api_version_string());
     try std.testing.expect(is_api_compatible(0));
     try std.testing.expect(!is_api_compatible(1));
-}
-
-test "stable api facade exports are reachable" {
-    var agent = StableApi.AgentType.init(std.testing.allocator);
-    defer agent.deinit();
-
-    const stream_id = try agent.add_stream(1);
-    try agent.get_stream(stream_id).?.set_local_credentials("uf", "pw");
-
-    var desc = try StableApi.build_local_description_fn(std.testing.allocator, agent.get_stream(stream_id).?, null);
-    defer desc.deinit(std.testing.allocator);
-    try std.testing.expectEqual(stream_id, desc.stream_id);
 }
 
 test "active feature flags are accessible" {
