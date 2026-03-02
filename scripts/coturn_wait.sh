@@ -8,7 +8,8 @@ SLEEP_SEC="0.2"
 
 i=0
 while [ "$i" -lt "$TRIES" ]; do
-  if timeout 1 bash -c "</dev/udp/${HOST}/${PORT}" >/dev/null 2>&1; then
+  if timeout 1 bash -c "</dev/udp/${HOST}/${PORT}" >/dev/null 2>&1 && \
+     timeout 1 bash -c "</dev/tcp/${HOST}/${PORT}" >/dev/null 2>&1; then
     echo "coturn appears reachable at ${HOST}:${PORT}"
     exit 0
   fi

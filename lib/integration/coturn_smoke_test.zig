@@ -75,6 +75,62 @@ fn wait_for_relayed_payload(
     return error.Timeout;
 }
 
+fn send_tcp_stream_retry(
+    stream: *libdice.TcpCandidateStream,
+    payload: []const u8,
+    timeout_ms: u64,
+) !void {
+    const start = std.time.milliTimestamp();
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < timeout_ms) {
+        _ = stream.send(payload) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(poll_sleep_ms * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
+fn wait_for_tcp_stream_stun_packet(
+    stream: *libdice.TcpCandidateStream,
+    recv_buf: []u8,
+    timeout_ms: u64,
+) !?libdice.StunMessageView {
+    const start = std.time.milliTimestamp();
+    var buffered: usize = 0;
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < timeout_ms) {
+        const n = stream.recv(recv_buf[buffered..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(poll_sleep_ms * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) {
+            std.Thread.sleep(poll_sleep_ms * std.time.ns_per_ms);
+            continue;
+        }
+
+        buffered += n;
+        while (buffered >= 20) {
+            const message_len = std.mem.readInt(u16, recv_buf[2..4], .big);
+            const total_len = 20 + @as(usize, message_len);
+            if (buffered < total_len) break;
+
+            const view = try libdice.parse_stun_message(recv_buf[0..total_len]);
+            if (buffered > total_len) {
+                std.mem.copyForwards(u8, recv_buf[0 .. buffered - total_len], recv_buf[total_len..buffered]);
+            }
+            buffered -= total_len;
+            return view;
+        }
+    }
+    return null;
+}
+
 const AuthAllocateResult = struct {
     key: libdice.Md5Digest,
 };
@@ -140,6 +196,56 @@ fn complete_authenticated_allocate(
         });
 
         _ = try turn.socket.send_to(server, current_packet);
+    }
+
+    return error.Timeout;
+}
+
+fn complete_authenticated_allocate_tcp(
+    stream: *libdice.TcpCandidateStream,
+    username: []const u8,
+    password: []const u8,
+    packet_buf: []u8,
+    recv_buf: []u8,
+) !AuthAllocateResult {
+    var tx = [_]u8{ 6, 0, 0, 1, 6, 0, 0, 2, 6, 0, 0, 3 };
+    var current_packet = try libdice.stun_turn_build_allocate_request(packet_buf, tx, .{});
+    try send_tcp_stream_retry(stream, current_packet, 1_000);
+
+    const start = std.time.milliTimestamp();
+    var attempts: usize = 0;
+    var key: ?libdice.Md5Digest = null;
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < max_wait_ms and attempts < 12) : (attempts += 1) {
+        const response = (try wait_for_tcp_stream_stun_packet(stream, recv_buf, 800)) orelse {
+            try send_tcp_stream_retry(stream, current_packet, 1_000);
+            continue;
+        };
+
+        if (libdice.stun_turn_is_allocate_success_response(response)) {
+            const auth_key = key orelse return error.ExpectedAuthKey;
+            const parsed = try libdice.stun_turn_parse_allocate_success_response(response, auth_key[0..]);
+            try std.testing.expect(parsed.relayed_address != null);
+            return .{ .key = auth_key };
+        }
+
+        if (!libdice.stun_turn_is_allocate_error_response(response)) continue;
+        const code = (try libdice.stun_turn_read_error_code(response)) orelse return error.ExpectedTurnErrorCode;
+        if (code != 401 and code != 438) return error.UnexpectedTurnErrorCode;
+
+        const realm = (try libdice.stun_turn_read_realm(response)) orelse return error.ExpectedRealm;
+        const nonce = (try libdice.stun_turn_read_nonce(response)) orelse return error.ExpectedNonce;
+        const derived_key = try derive_turn_long_term_key(username, realm, password);
+        key = derived_key;
+
+        tx[11] +%= 1;
+        current_packet = try libdice.stun_turn_build_allocate_request(packet_buf, tx, .{
+            .username = username,
+            .realm = realm,
+            .nonce = nonce,
+            .integrity_key = derived_key[0..],
+            .include_fingerprint = true,
+        });
+        try send_tcp_stream_retry(stream, current_packet, 1_000);
     }
 
     return error.Timeout;
@@ -427,4 +533,22 @@ test "coturn relayed data flows between authenticated allocations" {
     try complete_authenticated_channel_bind(&turn_b, username.value, password.value, &auth_b.key, 0x4001, relayed_a_candidate, relayed_a, &send_b, &recv_b);
     _ = try turn_b.send_to_peer(&send_b, tx_send, relayed_a_candidate, "relay-channel-data", 0);
     try wait_for_relayed_payload(&turn_a, &recv_a, "relay-channel-data", max_wait_ms);
+}
+
+test "coturn tcp allocate challenge-retry succeeds with long-term credentials" {
+    const server_text = env_or_default("COTURN_SERVER", "127.0.0.1:3478");
+    defer server_text.deinit();
+    const username = env_or_default("COTURN_USERNAME", "test");
+    defer username.deinit();
+    const password = env_or_default("COTURN_PASSWORD", "testpass");
+    defer password.deinit();
+
+    const server = try libdice.net_parse_ip_port(server_text.value);
+    var stream = try libdice.TcpCandidateStream.connect_nonblocking(server);
+    defer stream.deinit();
+
+    var packet_buf: [1024]u8 = undefined;
+    var recv_buf: [2048]u8 = undefined;
+
+    _ = try complete_authenticated_allocate_tcp(&stream, username.value, password.value, &packet_buf, &recv_buf);
 }

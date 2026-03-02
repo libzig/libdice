@@ -19,6 +19,7 @@ fi
 
 docker run -d --name "${NAME}" \
   -p "${PORT}:${PORT}/udp" \
+  -p "${PORT}:${PORT}/tcp" \
   --restart unless-stopped \
   "${IMAGE}" \
   -n \
