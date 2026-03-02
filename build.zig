@@ -226,8 +226,26 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_ice_demo_selector.addArgs(args);
     }
-    const ice_demo_selector_step = b.step("run-ice-demo", "Run ICE demo selector (pump|timeout|drive|sdp)");
+    const ice_demo_selector_step = b.step("run-ice-demo", "Run ICE demo selector (pump|timeout|drive|sdp|simple)");
     ice_demo_selector_step.dependOn(&run_ice_demo_selector.step);
+
+    // Simple minimal demo
+    const simple_example_module = b.createModule(.{
+        .root_source_file = b.path("examples/simple_example.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    simple_example_module.addImport("libdice", libdice_module);
+
+    const simple_example = b.addExecutable(.{
+        .name = "simple_example",
+        .root_module = simple_example_module,
+    });
+    b.installArtifact(simple_example);
+
+    const run_simple_example = b.addRunArtifact(simple_example);
+    const simple_example_step = b.step("run-simple-example", "Run minimal simple example");
+    simple_example_step.dependOn(&run_simple_example.step);
 
     // SDP-style signaling demo
     const sdp_example_module = b.createModule(.{
@@ -259,9 +277,13 @@ pub fn build(b: *std.Build) void {
     const run_ice_demo_sdp_summary = b.addRunArtifact(ice_demo_selector);
     run_ice_demo_sdp_summary.addArgs(&.{ "sdp", "--summary" });
 
+    const run_ice_demo_simple_summary = b.addRunArtifact(ice_demo_selector);
+    run_ice_demo_simple_summary.addArgs(&.{ "simple", "--summary" });
+
     const examples_smoke_step = b.step("test-examples-smoke", "Run nonblocking example smoke scenarios");
     examples_smoke_step.dependOn(&run_ice_demo_pump_summary.step);
     examples_smoke_step.dependOn(&run_ice_demo_timeout_summary.step);
     examples_smoke_step.dependOn(&run_ice_demo_drive_summary.step);
     examples_smoke_step.dependOn(&run_ice_demo_sdp_summary.step);
+    examples_smoke_step.dependOn(&run_ice_demo_simple_summary.step);
 }
