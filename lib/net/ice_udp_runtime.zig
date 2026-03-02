@@ -191,6 +191,7 @@ pub const DriveLoopSummary = struct {
     last_tick_ms: u64,
     total_started_checks: usize,
     total_retransmits_sent: usize,
+    total_consent_probes_sent: usize,
     total_turn_backoff_skipped_bindings: usize,
     total_packets_seen: usize,
     total_completed_checks: usize,
@@ -199,6 +200,7 @@ pub const DriveLoopSummary = struct {
     total_turn_control_handled: usize,
     total_turn_auth_challenges: usize,
     total_turn_non_retryable_errors: usize,
+    total_consent_responses: usize,
     max_turn_error_streak: u8,
     last_turn_error_code_seen: ?u16,
     total_timed_out_checks: usize,
@@ -702,6 +704,7 @@ pub const IceUdpRuntimeBridge = struct {
 
         var total_started_checks: usize = 0;
         var total_retransmits_sent: usize = 0;
+        var total_consent_probes_sent: usize = 0;
         var total_turn_backoff_skipped_bindings: usize = 0;
         var total_packets_seen: usize = 0;
         var total_completed_checks: usize = 0;
@@ -710,6 +713,7 @@ pub const IceUdpRuntimeBridge = struct {
         var total_turn_control_handled: usize = 0;
         var total_turn_auth_challenges: usize = 0;
         var total_turn_non_retryable_errors: usize = 0;
+        var total_consent_responses: usize = 0;
         var max_turn_error_streak: u8 = 0;
         var last_turn_error_code_seen: ?u16 = null;
         var total_timed_out_checks: usize = 0;
@@ -736,6 +740,7 @@ pub const IceUdpRuntimeBridge = struct {
             last_tick_ms = now_ms;
             total_started_checks += tick.started_checks;
             total_retransmits_sent += tick.retransmits_sent;
+            total_consent_probes_sent += tick.consent_probes_sent;
             total_turn_backoff_skipped_bindings += tick.turn_backoff_skipped_bindings;
             total_packets_seen += tick.advance.packets_seen;
             total_completed_checks += tick.advance.completed_checks;
@@ -744,6 +749,7 @@ pub const IceUdpRuntimeBridge = struct {
             total_turn_control_handled += tick.advance.turn_control_handled;
             total_turn_auth_challenges += tick.advance.turn_auth_challenges;
             total_turn_non_retryable_errors += tick.advance.turn_non_retryable_errors;
+            total_consent_responses += tick.advance.consent_responses;
             max_turn_error_streak = @max(max_turn_error_streak, tick.turn_max_error_streak);
             if (tick.turn_last_error_code_seen) |code| last_turn_error_code_seen = code;
             total_timed_out_checks += tick.advance.timed_out_checks;
@@ -763,6 +769,7 @@ pub const IceUdpRuntimeBridge = struct {
                     .last_tick_ms = last_tick_ms,
                     .total_started_checks = total_started_checks,
                     .total_retransmits_sent = total_retransmits_sent,
+                    .total_consent_probes_sent = total_consent_probes_sent,
                     .total_turn_backoff_skipped_bindings = total_turn_backoff_skipped_bindings,
                     .total_packets_seen = total_packets_seen,
                     .total_completed_checks = total_completed_checks,
@@ -771,6 +778,7 @@ pub const IceUdpRuntimeBridge = struct {
                     .total_turn_control_handled = total_turn_control_handled,
                     .total_turn_auth_challenges = total_turn_auth_challenges,
                     .total_turn_non_retryable_errors = total_turn_non_retryable_errors,
+                    .total_consent_responses = total_consent_responses,
                     .max_turn_error_streak = max_turn_error_streak,
                     .last_turn_error_code_seen = last_turn_error_code_seen,
                     .total_timed_out_checks = total_timed_out_checks,
@@ -797,6 +805,7 @@ pub const IceUdpRuntimeBridge = struct {
             .last_tick_ms = last_tick_ms,
             .total_started_checks = total_started_checks,
             .total_retransmits_sent = total_retransmits_sent,
+            .total_consent_probes_sent = total_consent_probes_sent,
             .total_turn_backoff_skipped_bindings = total_turn_backoff_skipped_bindings,
             .total_packets_seen = total_packets_seen,
             .total_completed_checks = total_completed_checks,
@@ -805,6 +814,7 @@ pub const IceUdpRuntimeBridge = struct {
             .total_turn_control_handled = total_turn_control_handled,
             .total_turn_auth_challenges = total_turn_auth_challenges,
             .total_turn_non_retryable_errors = total_turn_non_retryable_errors,
+            .total_consent_responses = total_consent_responses,
             .max_turn_error_streak = max_turn_error_streak,
             .last_turn_error_code_seen = last_turn_error_code_seen,
             .total_timed_out_checks = total_timed_out_checks,
@@ -2175,6 +2185,8 @@ test "udp bridge drive loop stops on quiescent runtime" {
 
     try std.testing.expectEqual(DriveLoopStopReason.quiescent, loop.stop_reason);
     try std.testing.expectEqual(@as(usize, 1), loop.ticks_run);
+    try std.testing.expectEqual(@as(usize, 0), loop.total_consent_probes_sent);
+    try std.testing.expectEqual(@as(usize, 0), loop.total_consent_responses);
     try std.testing.expectEqual(@as(usize, 0), loop.final_pending_transactions);
 }
 
@@ -2239,6 +2251,8 @@ test "udp bridge drive loop reaches deadline when checks remain pending" {
 
     try std.testing.expectEqual(DriveLoopStopReason.deadline_reached, loop.stop_reason);
     try std.testing.expectEqual(@as(usize, 1), loop.ticks_run);
+    try std.testing.expectEqual(@as(usize, 0), loop.total_consent_probes_sent);
+    try std.testing.expectEqual(@as(usize, 0), loop.total_consent_responses);
     try std.testing.expect(loop.final_pending_transactions > 0);
 }
 
