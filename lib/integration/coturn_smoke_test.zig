@@ -44,6 +44,37 @@ fn derive_turn_long_term_key(username: []const u8, realm: []const u8, password: 
     return libdice.md5_digest(key_material);
 }
 
+fn stun_to_candidate_address(address: libdice.StunAddress) libdice.CandidateAddress {
+    return switch (address) {
+        .ipv4 => |v4| .{ .ipv4 = .{ .ip = v4.ip, .port = v4.port } },
+        .ipv6 => |v6| .{ .ipv6 = .{ .ip = v6.ip, .port = v6.port } },
+    };
+}
+
+fn wait_for_relayed_payload(
+    turn: *libdice.TurnUdpSocket,
+    recv_buf: []u8,
+    expected_payload: []const u8,
+    timeout_ms: u64,
+) !void {
+    const start = std.time.milliTimestamp();
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < timeout_ms) {
+        const packet = try turn.recv_from_server(recv_buf) orelse {
+            std.Thread.sleep(poll_sleep_ms * std.time.ns_per_ms);
+            continue;
+        };
+
+        switch (packet) {
+            .relayed_data => |data| {
+                if (std.mem.eql(u8, data.payload, expected_payload)) return;
+            },
+            else => {},
+        }
+    }
+
+    return error.Timeout;
+}
+
 const AuthAllocateResult = struct {
     key: libdice.Md5Digest,
 };
@@ -344,4 +375,56 @@ test "coturn permission and channel bind succeed after authenticated allocate" {
 
     try complete_authenticated_permission(&turn, username.value, password.value, &auth.key, peer_candidate, peer_stun, &out, &recv);
     try complete_authenticated_channel_bind(&turn, username.value, password.value, &auth.key, 0x4001, peer_candidate, peer_stun, &out, &recv);
+}
+
+test "coturn relayed data flows between authenticated allocations" {
+    const server_text = env_or_default("COTURN_SERVER", "127.0.0.1:3478");
+    defer server_text.deinit();
+    const username = env_or_default("COTURN_USERNAME", "test");
+    defer username.deinit();
+    const password = env_or_default("COTURN_PASSWORD", "testpass");
+    defer password.deinit();
+
+    const server = try libdice.net_parse_ip_port(server_text.value);
+
+    var turn_a = try libdice.TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        server,
+    );
+    defer turn_a.deinit();
+
+    var turn_b = try libdice.TurnUdpSocket.init_nonblocking(
+        std.testing.allocator,
+        .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } },
+        server,
+    );
+    defer turn_b.deinit();
+
+    var send_a: [1024]u8 = undefined;
+    var recv_a: [2048]u8 = undefined;
+    var auth_a = try complete_authenticated_allocate(&turn_a, server, username.value, password.value, &send_a, &recv_a);
+
+    var send_b: [1024]u8 = undefined;
+    var recv_b: [2048]u8 = undefined;
+    var auth_b = try complete_authenticated_allocate(&turn_b, server, username.value, password.value, &send_b, &recv_b);
+
+    const relayed_a = turn_a.allocation.?.relayed_address orelse return error.ExpectedRelayedAddress;
+    const relayed_b = turn_b.allocation.?.relayed_address orelse return error.ExpectedRelayedAddress;
+    const relayed_a_candidate = stun_to_candidate_address(relayed_a);
+    const relayed_b_candidate = stun_to_candidate_address(relayed_b);
+
+    try complete_authenticated_permission(&turn_a, username.value, password.value, &auth_a.key, relayed_b_candidate, relayed_b, &send_a, &recv_a);
+    try complete_authenticated_permission(&turn_b, username.value, password.value, &auth_b.key, relayed_a_candidate, relayed_a, &send_b, &recv_b);
+
+    const tx_send = [_]u8{ 5, 5, 0, 1, 6, 6, 0, 2, 7, 7, 0, 3 };
+    _ = try turn_b.send_data_indication(&send_b, tx_send, .{
+        .peer_address = relayed_a,
+        .data = "relay-data-indication",
+    });
+    try wait_for_relayed_payload(&turn_a, &recv_a, "relay-data-indication", max_wait_ms);
+
+    try complete_authenticated_channel_bind(&turn_b, username.value, password.value, &auth_b.key, 0x4001, relayed_a_candidate, relayed_a, &send_b, &recv_b);
+    _ = try turn_b.send_to_peer(&send_b, tx_send, relayed_a_candidate, "relay-channel-data", 0);
+    try wait_for_relayed_payload(&turn_a, &recv_a, "relay-channel-data", max_wait_ms);
 }
