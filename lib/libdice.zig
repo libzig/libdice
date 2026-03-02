@@ -60,6 +60,10 @@ pub const candidate_exchange_encode_candidate_line = @import("core/candidate_exc
 pub const candidate_exchange_parse_candidate_line = @import("core/candidate_exchange.zig").parse_candidate_line;
 pub const candidate_exchange_encode_description = @import("core/candidate_exchange.zig").encode_description;
 pub const candidate_exchange_parse_description = @import("core/candidate_exchange.zig").parse_description;
+pub const LoopbackTextExchangeSummary = @import("core/loopback_harness.zig").TextExchangeSummary;
+pub const LoopbackPairPopulateSummary = @import("core/loopback_harness.zig").PairPopulateSummary;
+pub const loopback_exchange_descriptions_via_text = @import("core/loopback_harness.zig").exchange_descriptions_via_text;
+pub const loopback_populate_checklists_both = @import("core/loopback_harness.zig").populate_checklists_both;
 pub const Candidate = @import("core/candidate.zig").Candidate;
 pub const CandidateType = @import("core/candidate.zig").CandidateType;
 pub const CandidateTransport = @import("core/candidate.zig").Transport;
@@ -760,4 +764,51 @@ test "candidate exchange exports are reachable" {
     var parsed_desc = try candidate_exchange_parse_description(std.testing.allocator, encoded);
     defer parsed_desc.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed_desc.candidates.len);
+}
+
+test "loopback harness exports are reachable" {
+    var a = Agent.init(std.testing.allocator);
+    defer a.deinit();
+    var b = Agent.init(std.testing.allocator);
+    defer b.deinit();
+
+    const sa = try a.add_stream(1);
+    const sb = try b.add_stream(1);
+    try a.get_stream(sa).?.set_local_credentials("ua", "pa");
+    try b.get_stream(sb).?.set_local_credentials("ub", "pb");
+
+    const addr_a: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 210 }, .port = 5000 } };
+    const addr_b: CandidateAddress = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 210 }, .port = 6000 } };
+    try std.testing.expect(try a.add_local_candidate(sa, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .host, addr_a),
+        .priority = candidate_compute_priority(.host, 100, 1),
+        .address = addr_a,
+    }));
+    try std.testing.expect(try b.add_local_candidate(sb, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate_compute_foundation(.udp, .host, addr_b),
+        .priority = candidate_compute_priority(.host, 100, 1),
+        .address = addr_b,
+    }));
+
+    const ex = try loopback_exchange_descriptions_via_text(std.testing.allocator, &a, sa, &b, sb, null);
+    try std.testing.expectEqual(@as(usize, 1), ex.left_apply.candidates_added);
+
+    var ra = IceRuntime.init(std.testing.allocator, &a, .{}, .{}, .regular);
+    defer ra.deinit();
+    var rb = IceRuntime.init(std.testing.allocator, &b, .{}, .{}, .regular);
+    defer rb.deinit();
+    try std.testing.expect(try ra.attach_stream(sa));
+    try std.testing.expect(try rb.attach_stream(sb));
+
+    const pairs = try loopback_populate_checklists_both(&ra, sa, true, 1_000, .{}, &rb, sb, false, 2_000, .{});
+    try std.testing.expectEqual(@as(usize, 1), pairs.left.added);
+    try std.testing.expectEqual(@as(usize, 1), pairs.right.added);
 }
