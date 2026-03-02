@@ -910,6 +910,71 @@ test "ice runtime consent ticking aggregates component failures" {
     try std.testing.expectEqual(@as(usize, 1), summary.failed_components);
 }
 
+test "ice runtime ignores consent response from non-selected remote" {
+    var agent = agent_mod.Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 111 }, .port = 5000 } };
+    const remote_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 198, 51, 100, 111 }, .port = 6000 } };
+    const spoofed_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 88 }, .port = 7000 } };
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 2,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, remote_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = remote_addr,
+    }));
+
+    var runtime = IceRuntime.init(
+        std.testing.allocator,
+        &agent,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 },
+        .regular,
+    );
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 7300);
+    try runtime.start_connecting_all();
+
+    var prng = std.Random.DefaultPrng.init(26);
+    const started = (try runtime.start_next_check_any(prng.random(), 0)).?;
+
+    var check_ok_packet: [20]u8 = undefined;
+    const check_ok_header = @import("../protocol/stun/message.zig").Header.init(0x0101, 0, started.transaction_id);
+    _ = try check_ok_header.encode(&check_ok_packet);
+    const check_ok_view = try parser.parse_message(&check_ok_packet);
+    _ = try runtime.on_response(started.stream_id, started.component_id, check_ok_view, 2);
+
+    var due: [1]DueConsentProbe = undefined;
+    const due_count = try runtime.collect_due_consent_probes_all(12, &due);
+    try std.testing.expectEqual(@as(usize, 1), due_count);
+    try runtime.mark_consent_probe_sent(stream_id, 1, 12);
+
+    const consent_tx = [_]u8{ 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44 };
+    var consent_packet: [128]u8 = undefined;
+    const consent_ok = try usage_bind.build_binding_success_response(&consent_packet, consent_tx, .{});
+    const consent_view = try parser.parse_message(consent_ok);
+
+    try std.testing.expect(!(try runtime.maybe_on_consent_response(stream_id, 1, spoofed_addr, consent_view, 13)));
+
+    const summary = runtime.tick_consent_all(17);
+    try std.testing.expectEqual(@as(usize, 1), summary.failed_components);
+}
+
 test "ice runtime stats snapshot" {
     var agent = agent_mod.Agent.init(std.testing.allocator);
     defer agent.deinit();
