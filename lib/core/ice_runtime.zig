@@ -7,6 +7,7 @@ const conncheck = @import("conncheck.zig");
 const consent = @import("consent.zig");
 const nomination = @import("nomination.zig");
 const parser = @import("../protocol/stun/parser.zig");
+const usage_bind = @import("../protocol/stun/usage_bind.zig");
 const transaction = @import("../protocol/stun/transaction.zig");
 
 pub const StartedCheck = struct {
@@ -83,6 +84,14 @@ pub const DueRetransmit = struct {
     local_candidate_id: u64,
     remote_candidate_id: u64,
     nominated: bool,
+};
+
+pub const DueConsentProbe = struct {
+    stream_id: u32,
+    component_id: u16,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
 };
 
 const RuntimeEntry = struct {
@@ -364,6 +373,58 @@ pub const IceRuntime = struct {
     ) !void {
         const entry = self.find_entry(stream_id) orelse return error.NotFound;
         try entry.runtime.mark_retransmitted(component_id, transaction_id, now_ms);
+    }
+
+    pub fn collect_due_consent_probes_all(self: *IceRuntime, now_ms: u64, out: []DueConsentProbe) !usize {
+        var written: usize = 0;
+        for (self.entries.items) |*entry| {
+            if (written >= out.len) break;
+
+            const room = out.len - written;
+            var local = try self.allocator.alloc(stream_connectivity.DueConsentProbe, room);
+            defer self.allocator.free(local);
+
+            const count = entry.runtime.collect_due_consent_probes(now_ms, local);
+            for (local[0..@min(room, count)]) |item| {
+                out[written] = .{
+                    .stream_id = entry.stream_id,
+                    .component_id = item.component_id,
+                    .pair_id = item.pair_id,
+                    .local_candidate_id = item.local_candidate_id,
+                    .remote_candidate_id = item.remote_candidate_id,
+                };
+                written += 1;
+            }
+        }
+        return written;
+    }
+
+    pub fn mark_consent_probe_sent(self: *IceRuntime, stream_id: u32, component_id: u16, now_ms: u64) !void {
+        const entry = self.find_entry(stream_id) orelse return error.NotFound;
+        try entry.runtime.mark_consent_probe_sent(component_id, now_ms);
+    }
+
+    pub fn maybe_on_consent_response(
+        self: *IceRuntime,
+        stream_id: u32,
+        component_id: u16,
+        from: candidate.Address,
+        view: parser.MessageView,
+        now_ms: u64,
+    ) !bool {
+        if (!usage_bind.is_binding_response(view)) return false;
+
+        const entry = self.find_entry(stream_id) orelse return false;
+        const engine = entry.runtime.get_engine(component_id) orelse return false;
+        const selected = engine.component.selected_pair orelse return false;
+        const remote_candidate = self.agent.find_remote_candidate_by_id(stream_id, selected.remote_candidate_id) catch return false;
+        if (!candidate.Address.eql(remote_candidate.address, from)) return false;
+
+        entry.runtime.mark_consent_response(component_id, now_ms) catch |err| switch (err) {
+            error.NotArmed => return false,
+            else => return err,
+        };
+        return true;
     }
 
     pub fn expire_all(self: *IceRuntime, now_ms: u64, out: []TimedOutCheck) !usize {
@@ -839,9 +900,12 @@ test "ice runtime consent ticking aggregates component failures" {
     const view = try parser.parse_message(&packet);
     _ = try runtime.on_response(started.stream_id, started.component_id, view, 2);
 
-    // Trigger first missed consent probe path.
-    const entry = runtime.find_entry(stream_id).?;
-    try entry.runtime.get_engine(1).?.on_consent_probe_sent(12);
+    var due: [1]DueConsentProbe = undefined;
+    const due_count = try runtime.collect_due_consent_probes_all(12, &due);
+    try std.testing.expectEqual(@as(usize, 1), due_count);
+    try std.testing.expectEqual(stream_id, due[0].stream_id);
+    try std.testing.expectEqual(@as(u16, 1), due[0].component_id);
+    try runtime.mark_consent_probe_sent(stream_id, 1, 12);
     const summary = runtime.tick_consent_all(17);
     try std.testing.expectEqual(@as(usize, 1), summary.failed_components);
 }

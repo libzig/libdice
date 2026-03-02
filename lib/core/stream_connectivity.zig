@@ -39,6 +39,13 @@ pub const StreamConnectivityStats = struct {
     failed_components: usize,
 };
 
+pub const DueConsentProbe = struct {
+    component_id: u16,
+    pair_id: u64,
+    local_candidate_id: u64,
+    remote_candidate_id: u64,
+};
+
 pub const StreamEvent = struct {
     component_id: u16,
     event: connectivity_engine.Event,
@@ -136,6 +143,34 @@ pub const StreamConnectivityRuntime = struct {
             if (engine.consent_due_probe(now_ms)) return true;
         }
         return false;
+    }
+
+    pub fn collect_due_consent_probes(self: *StreamConnectivityRuntime, now_ms: u64, out: []DueConsentProbe) usize {
+        var written: usize = 0;
+        for (self.engines.items) |*engine| {
+            if (!engine.consent_due_probe(now_ms)) continue;
+            const selected = engine.component.selected_pair orelse continue;
+            if (written < out.len) {
+                out[written] = .{
+                    .component_id = engine.component.id,
+                    .pair_id = selected.pair_id,
+                    .local_candidate_id = selected.local_candidate_id,
+                    .remote_candidate_id = selected.remote_candidate_id,
+                };
+            }
+            written += 1;
+        }
+        return written;
+    }
+
+    pub fn mark_consent_probe_sent(self: *StreamConnectivityRuntime, component_id: u16, now_ms: u64) !void {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        try engine.on_consent_probe_sent(now_ms);
+    }
+
+    pub fn mark_consent_response(self: *StreamConnectivityRuntime, component_id: u16, now_ms: u64) !void {
+        const engine = self.get_engine(component_id) orelse return error.NotFound;
+        try engine.on_consent_response(now_ms);
     }
 
     pub fn tick_consent_all(self: *StreamConnectivityRuntime, now_ms: u64) usize {
@@ -473,7 +508,11 @@ test "stream connectivity runtime consent probing and failure tick" {
     _ = try runtime.on_response(1, view, 2);
 
     try std.testing.expect(runtime.any_consent_due_probe(12));
-    try runtime.get_engine(1).?.on_consent_probe_sent(12);
+    var due: [1]DueConsentProbe = undefined;
+    const due_count = runtime.collect_due_consent_probes(12, &due);
+    try std.testing.expectEqual(@as(usize, 1), due_count);
+    try std.testing.expectEqual(@as(u16, 1), due[0].component_id);
+    try runtime.mark_consent_probe_sent(1, 12);
     const failed = runtime.tick_consent_all(17);
     try std.testing.expectEqual(@as(usize, 1), failed);
     try std.testing.expectEqual(component.ComponentState.failed, try runtime.component_state(1));

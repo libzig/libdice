@@ -59,6 +59,7 @@ pub const BidirectionalAdvanceSummary = struct {
     turn_control_handled: usize,
     turn_auth_challenges: usize,
     turn_non_retryable_errors: usize,
+    consent_responses: usize,
     timed_out_checks: usize,
     failed_consents: usize,
 };
@@ -127,6 +128,7 @@ pub const IoTickOptions = struct {
 pub const IoTickSummary = struct {
     started_checks: usize,
     retransmits_sent: usize,
+    consent_probes_sent: usize,
     turn_maintenance_sent: usize,
     turn_backoff_skipped_bindings: usize,
     turn_last_error_code_seen: ?u16,
@@ -146,6 +148,7 @@ pub const PumpOnceOptions = struct {
 pub const PumpOnceSummary = struct {
     started_checks: usize,
     retransmits_sent: usize,
+    consent_probes_sent: usize,
     turn_maintenance_sent: usize,
     turn_backoff_skipped_bindings: usize,
     turn_last_error_code_seen: ?u16,
@@ -157,6 +160,7 @@ pub const PumpOnceSummary = struct {
     turn_control_handled: usize,
     turn_auth_challenges: usize,
     turn_non_retryable_errors: usize,
+    consent_responses: usize,
     timed_out_checks: usize,
     failed_consents: usize,
     events_drained: usize,
@@ -472,6 +476,7 @@ pub const IceUdpRuntimeBridge = struct {
                 error.NotFound,
                 error.UnknownTransactionContext,
                 => {
+                    _ = try self.runtime.maybe_on_consent_response(packet.stream_id, packet.component_id, packet.from, view, now_ms);
                     summary.ignored_packets += 1;
                     continue;
                 },
@@ -536,6 +541,7 @@ pub const IceUdpRuntimeBridge = struct {
             .turn_control_handled = 0,
             .turn_auth_challenges = 0,
             .turn_non_retryable_errors = 0,
+            .consent_responses = 0,
             .timed_out_checks = 0,
             .failed_consents = 0,
         };
@@ -567,6 +573,10 @@ pub const IceUdpRuntimeBridge = struct {
                 error.NotFound,
                 error.UnknownTransactionContext,
                 => {
+                    if (try self.runtime.maybe_on_consent_response(packet.stream_id, packet.component_id, packet.from, view, now_ms)) {
+                        summary.consent_responses += 1;
+                        continue;
+                    }
                     summary.ignored_packets += 1;
                     continue;
                 },
@@ -634,6 +644,12 @@ pub const IceUdpRuntimeBridge = struct {
             retransmit_sink[0..],
         );
 
+        const consent_probes_sent = try self.send_due_consent_probes(
+            now_ms,
+            outbound_packet_buf,
+            options.outbound_options,
+        );
+
         var turn_maintenance_sent: usize = 0;
         var turn_backoff_skipped_bindings: usize = 0;
         var turn_last_error_code_seen: ?u16 = null;
@@ -658,6 +674,7 @@ pub const IceUdpRuntimeBridge = struct {
         return .{
             .started_checks = started_checks,
             .retransmits_sent = retransmits_sent,
+            .consent_probes_sent = consent_probes_sent,
             .turn_maintenance_sent = turn_maintenance_sent,
             .turn_backoff_skipped_bindings = turn_backoff_skipped_bindings,
             .turn_last_error_code_seen = turn_last_error_code_seen,
@@ -734,7 +751,7 @@ pub const IceUdpRuntimeBridge = struct {
             total_events_drained += events_drained;
 
             const stats = self.runtime.stats();
-            const progress_this_tick = tick.started_checks + tick.retransmits_sent + tick.advance.packets_seen + tick.advance.timed_out_checks + tick.advance.failed_consents;
+            const progress_this_tick = tick.started_checks + tick.retransmits_sent + tick.consent_probes_sent + tick.advance.packets_seen + tick.advance.timed_out_checks + tick.advance.failed_consents;
             const runtime_pending = stats.pending_transactions + stats.waiting_pairs + stats.in_progress_pairs;
 
             if (options.stop_on_quiescent and progress_this_tick == 0 and runtime_pending == 0) {
@@ -855,6 +872,7 @@ pub const IceUdpRuntimeBridge = struct {
         return .{
             .started_checks = tick.io.started_checks,
             .retransmits_sent = tick.io.retransmits_sent,
+            .consent_probes_sent = tick.io.consent_probes_sent,
             .turn_maintenance_sent = tick.io.turn_maintenance_sent,
             .turn_backoff_skipped_bindings = tick.io.turn_backoff_skipped_bindings,
             .turn_last_error_code_seen = tick.io.turn_last_error_code_seen,
@@ -866,6 +884,7 @@ pub const IceUdpRuntimeBridge = struct {
             .turn_control_handled = tick.io.advance.turn_control_handled,
             .turn_auth_challenges = tick.io.advance.turn_auth_challenges,
             .turn_non_retryable_errors = tick.io.advance.turn_non_retryable_errors,
+            .consent_responses = tick.io.advance.consent_responses,
             .timed_out_checks = tick.io.advance.timed_out_checks,
             .failed_consents = tick.io.advance.failed_consents,
             .events_drained = tick.events_drained,
@@ -921,6 +940,36 @@ pub const IceUdpRuntimeBridge = struct {
         }
 
         return summary;
+    }
+
+    pub fn send_due_consent_probes(
+        self: *IceUdpRuntimeBridge,
+        now_ms: u64,
+        packet_buf: []u8,
+        options: OutboundCheckOptions,
+    ) !usize {
+        var due: [16]ice_runtime.DueConsentProbe = undefined;
+        const count = try self.runtime.collect_due_consent_probes_all(now_ms, &due);
+        var sent: usize = 0;
+
+        for (due[0..@min(due.len, count)]) |item| {
+            const remote_candidate = try self.runtime.agent.find_remote_candidate_by_id(item.stream_id, item.remote_candidate_id);
+            const tx_id = stun_tx_from_rng(std.crypto.random);
+            const packet = try usage_ice.build_connectivity_check_request(packet_buf, tx_id, options);
+            _ = try self.send_check_packet(
+                item.stream_id,
+                item.component_id,
+                item.local_candidate_id,
+                remote_candidate.address,
+                tx_id,
+                packet,
+                now_ms,
+            );
+            try self.runtime.mark_consent_probe_sent(item.stream_id, item.component_id, now_ms);
+            sent += 1;
+        }
+
+        return sent;
     }
 
     pub fn send_due_retransmits(
@@ -1789,6 +1838,119 @@ test "udp bridge io tick starts outbound checks and drains inbound traffic" {
     const advanced = try bridge.advance_bidirectional(100, &recv_buf, &send_buf, &completed, &timed_out, .{});
     try std.testing.expectEqual(@as(usize, 1), advanced.completed_checks);
     try std.testing.expectEqual(@as(u64, 6000), completed[0].meta.candidate_pair_id);
+}
+
+test "udp bridge io tick sends consent probes and records responses" {
+    var agent = @import("../core/agent.zig").Agent.init(std.testing.allocator);
+    defer agent.deinit();
+
+    const stream_id = try agent.add_stream(1);
+    const local_addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 245 }, .port = 5000 } };
+    var peer = try @import("udp_socket.zig").UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer peer.deinit();
+    const peer_addr = try peer.local_address();
+
+    try std.testing.expect(try agent.add_local_candidate(stream_id, .{
+        .id = 71,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, local_addr),
+        .priority = candidate.compute_candidate_priority(.host, 100, 1),
+        .address = local_addr,
+    }));
+    try std.testing.expect(try agent.add_remote_candidate(stream_id, .{
+        .id = 72,
+        .component_id = 1,
+        .candidate_type = .srflx,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .srflx, peer_addr),
+        .priority = candidate.compute_candidate_priority(.srflx, 90, 1),
+        .address = peer_addr,
+    }));
+
+    var runtime = ice_runtime.IceRuntime.init(
+        std.testing.allocator,
+        &agent,
+        .{},
+        .{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 1 },
+        .regular,
+    );
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.attach_stream(stream_id));
+    _ = try runtime.populate_stream_checklists(stream_id, true, 9100);
+    try runtime.start_connecting_all();
+
+    var bridge = IceUdpRuntimeBridge.init(std.testing.allocator, &runtime);
+    defer bridge.deinit();
+    _ = try bridge.add_binding(stream_id, 1, .{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+
+    var prng = std.Random.DefaultPrng.init(59);
+    var outbound_packet_buf: [256]u8 = undefined;
+    var recv_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+    var completed: [4]conncheck.CompletedCheck = undefined;
+    var timed_out: [2]ice_runtime.TimedOutCheck = undefined;
+
+    const first = try bridge.run_io_tick(
+        prng.random(),
+        0,
+        &outbound_packet_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        .{ .max_starts_per_tick = 1, .outbound_options = .{ .username = "l:r", .priority = 321, .role = .{ .role = .controlling, .tie_breaker = 9 } } },
+    );
+    try std.testing.expectEqual(@as(usize, 1), first.started_checks);
+
+    var request_buf: [256]u8 = undefined;
+    const request_recv = try peer.recv_from(&request_buf);
+    const request_view = try parser.parse_message(request_buf[0..request_recv.bytes]);
+    var response_buf: [256]u8 = undefined;
+    const response = try usage_ice.build_connectivity_check_success_response(&response_buf, request_view.header.transaction_id, .{});
+    _ = try peer.send_to(request_recv.from, response);
+
+    _ = try bridge.run_io_tick(
+        prng.random(),
+        2,
+        &outbound_packet_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 321, .role = .{ .role = .controlling, .tie_breaker = 9 } } },
+    );
+
+    const consent_tick = try bridge.run_io_tick(
+        prng.random(),
+        12,
+        &outbound_packet_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 321, .role = .{ .role = .controlling, .tie_breaker = 9 } } },
+    );
+    try std.testing.expectEqual(@as(usize, 1), consent_tick.consent_probes_sent);
+
+    const consent_recv = try peer.recv_from(&request_buf);
+    const consent_req = try parser.parse_message(request_buf[0..consent_recv.bytes]);
+    try std.testing.expect(usage_ice.is_connectivity_check_request(consent_req));
+    const consent_ok = try usage_ice.build_connectivity_check_success_response(&response_buf, consent_req.header.transaction_id, .{});
+    _ = try peer.send_to(consent_recv.from, consent_ok);
+
+    const settle = try bridge.run_io_tick(
+        prng.random(),
+        13,
+        &outbound_packet_buf,
+        &recv_buf,
+        &send_buf,
+        &completed,
+        &timed_out,
+        .{ .max_starts_per_tick = 0, .outbound_options = .{ .username = "l:r", .priority = 321, .role = .{ .role = .controlling, .tie_breaker = 9 } } },
+    );
+    try std.testing.expectEqual(@as(usize, 1), settle.advance.consent_responses);
 }
 
 test "udp bridge sends due retransmits" {
