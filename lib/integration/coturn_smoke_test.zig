@@ -115,7 +115,20 @@ fn wait_for_tcp_stream_stun_packet(
         }
 
         buffered += n;
-        while (buffered >= 20) {
+        while (buffered >= 4) {
+            const is_channel = (recv_buf[0] & 0b1100_0000) == 0b0100_0000;
+            if (is_channel) {
+                const payload_len = std.mem.readInt(u16, recv_buf[2..4], .big);
+                const total_len = 4 + @as(usize, payload_len);
+                if (buffered < total_len) break;
+                if (buffered > total_len) {
+                    std.mem.copyForwards(u8, recv_buf[0 .. buffered - total_len], recv_buf[total_len..buffered]);
+                }
+                buffered -= total_len;
+                continue;
+            }
+
+            if (buffered < 20) break;
             const message_len = std.mem.readInt(u16, recv_buf[2..4], .big);
             const total_len = 20 + @as(usize, message_len);
             if (buffered < total_len) break;
@@ -129,6 +142,22 @@ fn wait_for_tcp_stream_stun_packet(
         }
     }
     return null;
+}
+
+fn wait_for_tcp_relayed_data_indication(
+    stream: *libdice.TcpCandidateStream,
+    recv_buf: []u8,
+    expected_payload: []const u8,
+    timeout_ms: u64,
+) !void {
+    const start = std.time.milliTimestamp();
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < timeout_ms) {
+        const view = (try wait_for_tcp_stream_stun_packet(stream, recv_buf, 1_000)) orelse continue;
+        if (!libdice.stun_turn_is_data_indication(view)) continue;
+        const parsed = try libdice.stun_turn_parse_data_indication(view);
+        if (std.mem.eql(u8, parsed.data, expected_payload)) return;
+    }
+    return error.Timeout;
 }
 
 const AuthAllocateResult = struct {
@@ -752,4 +781,45 @@ test "coturn tcp permission and channel bind succeed after authenticated allocat
     const peer: libdice.StunAddress = .{ .ipv4 = .{ .ip = .{ 203, 0, 113, 55 }, .port = 5000 } };
     try complete_authenticated_permission_tcp(&stream_a, username.value, password.value, &auth_a.key, peer, &packet_a, &recv_a);
     try complete_authenticated_channel_bind_tcp(&stream_a, username.value, password.value, &auth_a.key, 0x4001, peer, &packet_a, &recv_a);
+}
+
+test "coturn tcp relayed data flows between authenticated allocations" {
+    const server_text = env_or_default("COTURN_SERVER", "127.0.0.1:3478");
+    defer server_text.deinit();
+    const username = env_or_default("COTURN_USERNAME", "test");
+    defer username.deinit();
+    const password = env_or_default("COTURN_PASSWORD", "testpass");
+    defer password.deinit();
+
+    const server = try libdice.net_parse_ip_port(server_text.value);
+    var stream_a = try libdice.TcpCandidateStream.connect_nonblocking(server);
+    defer stream_a.deinit();
+    var stream_b = try libdice.TcpCandidateStream.connect_nonblocking(server);
+    defer stream_b.deinit();
+
+    var packet_a: [1024]u8 = undefined;
+    var recv_a: [4096]u8 = undefined;
+    var auth_a = try complete_authenticated_allocate_tcp(&stream_a, username.value, password.value, &packet_a, &recv_a);
+    const relayed_a = auth_a.relayed_address orelse return error.ExpectedRelayedAddress;
+
+    var packet_b: [1024]u8 = undefined;
+    var recv_b: [4096]u8 = undefined;
+    var auth_b = try complete_authenticated_allocate_tcp(&stream_b, username.value, password.value, &packet_b, &recv_b);
+    const relayed_b = auth_b.relayed_address orelse return error.ExpectedRelayedAddress;
+
+    try complete_authenticated_permission_tcp(&stream_a, username.value, password.value, &auth_a.key, relayed_b, &packet_a, &recv_a);
+    try complete_authenticated_permission_tcp(&stream_b, username.value, password.value, &auth_b.key, relayed_a, &packet_b, &recv_b);
+
+    const tx_ind = [_]u8{ 9, 1, 0, 1, 9, 1, 0, 2, 9, 1, 0, 3 };
+    const send_ind = try libdice.stun_turn_build_send_indication(&packet_b, tx_ind, .{
+        .peer_address = relayed_a,
+        .data = "tcp-relay-indication",
+    });
+    try send_tcp_stream_retry(&stream_b, send_ind, 1_000);
+    try wait_for_tcp_relayed_data_indication(&stream_a, &recv_a, "tcp-relay-indication", max_wait_ms);
+
+    try complete_authenticated_channel_bind_tcp(&stream_b, username.value, password.value, &auth_b.key, 0x4001, relayed_a, &packet_b, &recv_b);
+    const channel_frame = try libdice.turn_channel_encode_frame(&packet_b, 0x4001, "tcp-relay-channel", true);
+    try send_tcp_stream_retry(&stream_b, channel_frame, 1_000);
+    try wait_for_tcp_relayed_data_indication(&stream_a, &recv_a, "tcp-relay-channel", max_wait_ms);
 }
