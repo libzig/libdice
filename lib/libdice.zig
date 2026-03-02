@@ -231,6 +231,21 @@ pub fn recommended_entrypoints() []const []const u8 {
     };
 }
 
+pub fn advanced_entrypoints() []const []const u8 {
+    return &.{
+        "EventLoop",
+        "TimerWheel",
+        "ComponentConnectivityEngine",
+        "StreamConnectivityRuntime",
+        "Checklist",
+        "StunMessageBuilder",
+        "StunTransactionStore",
+        "TurnTcpFramer",
+        "TurnTcpClient",
+        "ConnectivityCheckTracker",
+    };
+}
+
 pub fn active_feature_flags() FeatureFlags {
     return FeatureFlags.from_build_options();
 }
@@ -264,6 +279,13 @@ test "recommended entrypoints metadata is exposed" {
     try std.testing.expect(names.len >= 6);
     try std.testing.expectEqualStrings("Agent", names[0]);
     try std.testing.expectEqualStrings("IceRuntime", names[1]);
+}
+
+test "advanced entrypoints metadata is exposed" {
+    const names = advanced_entrypoints();
+    try std.testing.expect(names.len >= 8);
+    try std.testing.expectEqualStrings("EventLoop", names[0]);
+    try std.testing.expectEqualStrings("TurnTcpClient", names[8]);
 }
 
 test "active feature flags are accessible" {
