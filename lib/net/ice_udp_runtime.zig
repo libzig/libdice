@@ -7,6 +7,7 @@ const turn_socket_udp = @import("turn_socket_udp.zig");
 const turn_socket_tcp_client = @import("turn_socket_tcp_client.zig");
 const usage_ice = @import("../protocol/stun/usage_ice.zig");
 const usage_turn = @import("../protocol/stun/usage_turn.zig");
+const integrity = @import("../protocol/stun/integrity.zig");
 const address_attrs = @import("../protocol/stun/address_attrs.zig");
 const parser = @import("../protocol/stun/parser.zig");
 
@@ -1018,7 +1019,14 @@ pub const IceUdpRuntimeBridge = struct {
             if (binding.socket.allocation) |lease| {
                 if (auth_retry or now_ms >= lease.refresh_due_at_ms(options.allocation_refresh_margin_ms)) {
                     const tx_id = stun_tx_from_rng(random);
-                    _ = try binding.socket.send_refresh_request(packet_buf, tx_id, options.refresh_lifetime_seconds, nonce, realm, options.username);
+                    _ = try binding.socket.send_refresh_request(packet_buf, tx_id, .{
+                        .lifetime_seconds = options.refresh_lifetime_seconds,
+                        .nonce = nonce,
+                        .realm = realm,
+                        .username = options.username,
+                        .integrity_key = options.integrity_key,
+                        .include_fingerprint = options.include_fingerprint,
+                    });
                     summary.allocation_refreshes_sent += 1;
                     sent_for_binding += 1;
                 }
@@ -2476,6 +2484,8 @@ test "udp bridge turn maintenance sends refresh requests and prunes expired entr
         .username = "u",
         .realm = "r",
         .nonce = "n",
+        .integrity_key = "turn-key",
+        .include_fingerprint = true,
     });
 
     try std.testing.expectEqual(@as(usize, 0), summary.allocations_requested);
@@ -2496,9 +2506,21 @@ test "udp bridge turn maintenance sends refresh requests and prunes expired entr
         };
         const view = try parser.parse_message(recv[0..got.bytes]);
         switch (view.header.message_type) {
-            usage_turn.refresh_request_type => refresh_count += 1,
-            usage_turn.create_permission_request_type => permission_count += 1,
-            0x0009 => channel_bind_count += 1,
+            usage_turn.refresh_request_type => {
+                refresh_count += 1;
+                try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+                try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
+            },
+            usage_turn.create_permission_request_type => {
+                permission_count += 1;
+                try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+                try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
+            },
+            0x0009 => {
+                channel_bind_count += 1;
+                try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+                try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
+            },
             else => {},
         }
     }

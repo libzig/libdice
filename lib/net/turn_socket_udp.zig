@@ -283,8 +283,8 @@ pub const TurnUdpSocket = struct {
         return null;
     }
 
-    pub fn send_refresh_request(self: *TurnUdpSocket, packet_buf: []u8, transaction_id: [12]u8, lifetime_seconds: ?u32, nonce: ?[]const u8, realm: ?[]const u8, username: ?[]const u8) !usize {
-        const packet = try usage_turn.build_refresh_request(packet_buf, transaction_id, lifetime_seconds, nonce, realm, username);
+    pub fn send_refresh_request(self: *TurnUdpSocket, packet_buf: []u8, transaction_id: [12]u8, options: usage_turn.RefreshRequestOptions) !usize {
+        const packet = try usage_turn.build_refresh_request(packet_buf, transaction_id, options);
         return self.socket.send_to(self.server, packet);
     }
 

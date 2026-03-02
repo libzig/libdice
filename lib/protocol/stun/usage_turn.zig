@@ -58,6 +58,15 @@ pub const AllocateRequestOptions = struct {
     include_fingerprint: bool = false,
 };
 
+pub const RefreshRequestOptions = struct {
+    lifetime_seconds: ?u32 = null,
+    nonce: ?[]const u8 = null,
+    realm: ?[]const u8 = null,
+    username: ?[]const u8 = null,
+    integrity_key: ?[]const u8 = null,
+    include_fingerprint: bool = false,
+};
+
 pub const AllocateSuccessResponseInfo = struct {
     transaction_id: [12]u8,
     relayed_address: ?address_attrs.StunAddress,
@@ -144,25 +153,33 @@ pub fn build_allocate_request(buffer: []u8, transaction_id: [12]u8, options: All
     return builder.finish();
 }
 
-pub fn build_refresh_request(buffer: []u8, transaction_id: [12]u8, lifetime_seconds: ?u32, nonce: ?[]const u8, realm: ?[]const u8, username: ?[]const u8) encoder.EncodeError![]const u8 {
+pub fn build_refresh_request(buffer: []u8, transaction_id: [12]u8, options: RefreshRequestOptions) encoder.EncodeError![]const u8 {
     var builder = try encoder.Builder.init(buffer, refresh_request_type, transaction_id);
 
-    if (lifetime_seconds) |lifetime| {
+    if (options.lifetime_seconds) |lifetime| {
         var lifetime_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &lifetime_buf, lifetime, .big);
         try builder.add_attr(lifetime_attr_type, &lifetime_buf);
     }
 
-    if (nonce) |value| {
+    if (options.nonce) |value| {
         try builder.add_attr(nonce_attr_type, value);
     }
 
-    if (realm) |value| {
+    if (options.realm) |value| {
         try builder.add_attr(realm_attr_type, value);
     }
 
-    if (username) |value| {
+    if (options.username) |value| {
         try builder.add_attr(username_attr_type, value);
+    }
+
+    if (options.integrity_key) |key| {
+        try integrity.add_message_integrity_attr(&builder, key);
+    }
+
+    if (options.include_fingerprint) {
+        try integrity.add_fingerprint_attr(&builder);
     }
 
     return builder.finish();
@@ -433,11 +450,34 @@ test "build refresh request with optional attributes" {
     const tx_id = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
     var packet: [128]u8 = undefined;
 
-    const bytes = try build_refresh_request(&packet, tx_id, 0, "nonce-token", "example.org", "user");
+    const bytes = try build_refresh_request(&packet, tx_id, .{
+        .lifetime_seconds = 0,
+        .nonce = "nonce-token",
+        .realm = "example.org",
+        .username = "user",
+    });
     const view = try parser.parse_message(bytes);
 
     try std.testing.expectEqual(@as(u16, refresh_request_type), view.header.message_type);
     try std.testing.expectEqual(@as(u32, 0), (try read_lifetime_seconds(view)).?);
+}
+
+test "build refresh request can include integrity and fingerprint" {
+    const tx_id = [_]u8{ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+    var packet: [192]u8 = undefined;
+
+    const bytes = try build_refresh_request(&packet, tx_id, .{
+        .lifetime_seconds = 600,
+        .nonce = "nonce-token",
+        .realm = "example.org",
+        .username = "user",
+        .integrity_key = "turn-key",
+        .include_fingerprint = true,
+    });
+    const view = try parser.parse_message(bytes);
+
+    try std.testing.expect(try integrity.verify_embedded_message_integrity(view, "turn-key"));
+    try std.testing.expect(try integrity.verify_embedded_fingerprint(view));
 }
 
 test "read error code from TURN error response" {

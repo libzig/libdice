@@ -21,7 +21,7 @@ fn env_or_default(name: []const u8, default_value: []const u8) EnvValue {
     return .{ .value = default_value, .owned = null };
 }
 
-fn wait_for_stun_packet(turn: *libdice.TurnUdpSocket, recv_buf: []u8, timeout_ms: u64) !libdice.StunMessageView {
+fn wait_for_stun_packet(turn: *libdice.TurnUdpSocket, recv_buf: []u8, timeout_ms: u64) !?libdice.StunMessageView {
     const start = std.time.milliTimestamp();
     while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < timeout_ms) {
         const packet = try turn.recv_from_server(recv_buf) orelse {
@@ -35,10 +35,16 @@ fn wait_for_stun_packet(turn: *libdice.TurnUdpSocket, recv_buf: []u8, timeout_ms
         }
     }
 
-    return error.Timeout;
+    return null;
 }
 
-test "coturn allocate challenge exposes nonce and realm for retry" {
+fn derive_turn_long_term_key(username: []const u8, realm: []const u8, password: []const u8) !libdice.Md5Digest {
+    var key_material_buf: [512]u8 = undefined;
+    const key_material = try std.fmt.bufPrint(&key_material_buf, "{s}:{s}:{s}", .{ username, realm, password });
+    return libdice.md5_digest(key_material);
+}
+
+test "coturn allocate challenge allows building signed retry" {
     const server_text = env_or_default("COTURN_SERVER", "127.0.0.1:3478");
     defer server_text.deinit();
     const username = env_or_default("COTURN_USERNAME", "test");
@@ -59,30 +65,28 @@ test "coturn allocate challenge exposes nonce and realm for retry" {
     _ = try turn.send_allocate_request(&out, tx_challenge, .{});
 
     var recv: [2048]u8 = undefined;
-    const challenge = try wait_for_stun_packet(&turn, &recv, max_wait_ms);
+    const challenge = (try wait_for_stun_packet(&turn, &recv, max_wait_ms)) orelse return error.Timeout;
     try std.testing.expect(libdice.stun_turn_is_allocate_error_response(challenge));
-    const code = (try libdice.stun_turn_read_error_code(challenge)).?;
+
+    const code = (try libdice.stun_turn_read_error_code(challenge)) orelse return error.ExpectedTurnErrorCode;
     try std.testing.expect(code == 401 or code == 438);
 
-    const realm = (try libdice.stun_turn_read_realm(challenge)).?;
-    const nonce = (try libdice.stun_turn_read_nonce(challenge)).?;
+    const realm = (try libdice.stun_turn_read_realm(challenge)) orelse return error.ExpectedRealm;
+    const nonce = (try libdice.stun_turn_read_nonce(challenge)) orelse return error.ExpectedNonce;
+    const key = try derive_turn_long_term_key(username.value, realm, password.value);
 
-    var key_material_buf: [512]u8 = undefined;
-    const key_material = try std.fmt.bufPrint(&key_material_buf, "{s}:{s}:{s}", .{ username.value, realm, password.value });
-    const long_term_key = libdice.md5_digest(key_material);
-
-    const tx_allocate = [_]u8{ 4, 4, 1, 0, 9, 2, 8, 2, 7, 2, 6, 2 };
-    const retry_packet = try libdice.stun_turn_build_allocate_request(&out, tx_allocate, .{
+    const tx_retry = [_]u8{ 4, 4, 1, 0, 9, 2, 8, 2, 7, 2, 6, 2 };
+    const retry_packet = try libdice.stun_turn_build_allocate_request(&out, tx_retry, .{
         .username = username.value,
         .realm = realm,
         .nonce = nonce,
-        .integrity_key = &long_term_key,
+        .integrity_key = key[0..],
         .include_fingerprint = true,
     });
 
     const retry_view = try libdice.parse_stun_message(retry_packet);
     try std.testing.expect((try libdice.stun_turn_read_realm(retry_view)) != null);
     try std.testing.expect((try libdice.stun_turn_read_nonce(retry_view)) != null);
-    try std.testing.expect(try libdice.stun_verify_embedded_message_integrity(retry_view, &long_term_key));
+    try std.testing.expect(try libdice.stun_verify_embedded_message_integrity(retry_view, key[0..]));
     try std.testing.expect(try libdice.stun_verify_embedded_fingerprint(retry_view));
 }
