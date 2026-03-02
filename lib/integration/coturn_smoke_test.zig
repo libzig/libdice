@@ -251,6 +251,57 @@ fn complete_authenticated_allocate_tcp(
     return error.Timeout;
 }
 
+fn complete_authenticated_refresh_tcp(
+    stream: *libdice.TcpCandidateStream,
+    username: []const u8,
+    password: []const u8,
+    key: *libdice.Md5Digest,
+    packet_buf: []u8,
+    recv_buf: []u8,
+) !void {
+    var tx = [_]u8{ 6, 9, 0, 1, 6, 9, 0, 2, 6, 9, 0, 3 };
+    var current_packet = try libdice.stun_turn_build_refresh_request(packet_buf, tx, .{ .lifetime_seconds = 300 });
+    try send_tcp_stream_retry(stream, current_packet, 1_000);
+
+    const start = std.time.milliTimestamp();
+    var attempts: usize = 0;
+    while (@as(u64, @intCast(std.time.milliTimestamp() - start)) < max_wait_ms and attempts < 12) : (attempts += 1) {
+        const response = (try wait_for_tcp_stream_stun_packet(stream, recv_buf, 800)) orelse {
+            try send_tcp_stream_retry(stream, current_packet, 1_000);
+            continue;
+        };
+
+        if (libdice.stun_turn_parse_refresh_success_response(response, key.*[0..])) |parsed| {
+            try std.testing.expect(parsed.lifetime_seconds != null);
+            return;
+        } else |err| switch (err) {
+            error.NotRefreshSuccessResponse => {},
+            else => return err,
+        }
+
+        if (!libdice.stun_is_error_response_type(response.header.message_type)) continue;
+        const code = (try libdice.stun_turn_read_error_code(response)) orelse return error.ExpectedTurnErrorCode;
+        if (code != 401 and code != 438) return error.UnexpectedTurnErrorCode;
+
+        const realm = (try libdice.stun_turn_read_realm(response)) orelse return error.ExpectedRealm;
+        const nonce = (try libdice.stun_turn_read_nonce(response)) orelse return error.ExpectedNonce;
+        key.* = try derive_turn_long_term_key(username, realm, password);
+
+        tx[11] +%= 1;
+        current_packet = try libdice.stun_turn_build_refresh_request(packet_buf, tx, .{
+            .lifetime_seconds = 300,
+            .username = username,
+            .realm = realm,
+            .nonce = nonce,
+            .integrity_key = key.*[0..],
+            .include_fingerprint = true,
+        });
+        try send_tcp_stream_retry(stream, current_packet, 1_000);
+    }
+
+    return error.Timeout;
+}
+
 fn complete_authenticated_permission(
     turn: *libdice.TurnUdpSocket,
     username: []const u8,
@@ -551,4 +602,22 @@ test "coturn tcp allocate challenge-retry succeeds with long-term credentials" {
     var recv_buf: [2048]u8 = undefined;
 
     _ = try complete_authenticated_allocate_tcp(&stream, username.value, password.value, &packet_buf, &recv_buf);
+}
+
+test "coturn tcp refresh succeeds after authenticated allocate" {
+    const server_text = env_or_default("COTURN_SERVER", "127.0.0.1:3478");
+    defer server_text.deinit();
+    const username = env_or_default("COTURN_USERNAME", "test");
+    defer username.deinit();
+    const password = env_or_default("COTURN_PASSWORD", "testpass");
+    defer password.deinit();
+
+    const server = try libdice.net_parse_ip_port(server_text.value);
+    var stream = try libdice.TcpCandidateStream.connect_nonblocking(server);
+    defer stream.deinit();
+
+    var packet_buf: [1024]u8 = undefined;
+    var recv_buf: [2048]u8 = undefined;
+    var auth = try complete_authenticated_allocate_tcp(&stream, username.value, password.value, &packet_buf, &recv_buf);
+    try complete_authenticated_refresh_tcp(&stream, username.value, password.value, &auth.key, &packet_buf, &recv_buf);
 }
