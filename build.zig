@@ -80,6 +80,23 @@ pub fn build(b: *std.Build) void {
     const coturn_integration_step = b.step("test-coturn-integration", "Run coturn integration smoke test");
     coturn_integration_step.dependOn(&run_coturn_integration.step);
 
+    // Libnice parity translation suite
+    const libnice_parity_module = b.createModule(.{
+        .root_source_file = b.path("lib/integration/libnice_parity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    libnice_parity_module.addImport("libdice", libdice_module);
+
+    const libnice_parity_tests = b.addTest(.{
+        .root_module = libnice_parity_module,
+    });
+    const run_libnice_parity = b.addRunArtifact(libnice_parity_tests);
+
+    const libnice_parity_step = b.step("test-libnice-parity", "Run translated libnice parity tests");
+    libnice_parity_step.dependOn(&run_libnice_parity.step);
+    test_step.dependOn(&run_libnice_parity.step);
+
     // Examples
 
     // Smoke server A
