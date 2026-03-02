@@ -94,3 +94,29 @@ test "udp nonblocking socket returns wouldblock when idle" {
     var buf: [64]u8 = undefined;
     try std.testing.expectError(error.WouldBlock, sock.recv_from(&buf));
 }
+
+test "libnice parity: test-bsd" {
+    var a = try UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer a.deinit();
+    var b = try UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer b.deinit();
+
+    const b_addr = try b.local_address();
+    _ = try a.send_to(b_addr, "bsd");
+    var buf: [16]u8 = undefined;
+    const got = try b.recv_from(&buf);
+    try std.testing.expectEqualStrings("bsd", buf[0..got.bytes]);
+}
+
+test "libnice parity: test-send-recv" {
+    var left = try UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer left.deinit();
+    var right = try UdpSocket.bind(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer right.deinit();
+
+    const right_addr = try right.local_address();
+    _ = try left.send_to(right_addr, "hello");
+    var recv_buf: [32]u8 = undefined;
+    const pkt = try right.recv_from(&recv_buf);
+    try std.testing.expectEqualStrings("hello", recv_buf[0..pkt.bytes]);
+}

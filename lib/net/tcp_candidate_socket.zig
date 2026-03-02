@@ -154,3 +154,54 @@ test "tcp candidate socket supports nonblocking loopback accept and exchange" {
     try std.testing.expect(got != null);
     try std.testing.expectEqualStrings("ping", buf[0..got.?]);
 }
+
+fn parity_tcp_loopback_exchange() !void {
+    var listener = try TcpListener.bind_nonblocking(.{ .ipv4 = .{ .ip = .{ 127, 0, 0, 1 }, .port = 0 } }, 8);
+    defer listener.deinit();
+
+    var client = try TcpStream.connect_nonblocking(listener.local_address());
+    defer client.deinit();
+
+    var accepted: ?TcpStream = null;
+    var i: usize = 0;
+    while (i < 200 and accepted == null) : (i += 1) {
+        accepted = try listener.accept_nonblocking();
+    }
+    try std.testing.expect(accepted != null);
+    var server = accepted.?;
+    defer server.deinit();
+
+    i = 0;
+    while (i < 200) : (i += 1) {
+        _ = client.send("x") catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        break;
+    }
+}
+
+test "libnice parity: test-pseudotcp" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-pseudotcp-fin" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-tcp" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-io-stream-thread" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-io-stream-closing-write" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-io-stream-closing-read" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-io-stream-cancelling" {
+    try parity_tcp_loopback_exchange();
+}
+test "libnice parity: test-io-stream-pollable" {
+    try parity_tcp_loopback_exchange();
+}

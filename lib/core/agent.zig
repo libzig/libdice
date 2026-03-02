@@ -412,3 +412,90 @@ test "agent candidate lookup by id" {
     try std.testing.expectEqual(@as(u64, 202), (try agent.find_remote_candidate_by_id(stream_id, 202)).id);
     try std.testing.expectError(error.NotFound, agent.find_remote_candidate_by_id(stream_id, 999));
 }
+
+test "libnice parity: test-add-remove-stream" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const s1 = try agent.add_stream(1);
+    const s2 = try agent.add_stream(2);
+    try std.testing.expect(agent.get_stream(s1) != null);
+    try std.testing.expect(agent.get_stream(s2) != null);
+    try std.testing.expect(agent.remove_stream(s1));
+}
+
+test "libnice parity: test-different-number-streams" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const s1 = try agent.add_stream(1);
+    const s2 = try agent.add_stream(3);
+    try std.testing.expectEqual(@as(usize, 1), agent.get_stream(s1).?.component_count());
+    try std.testing.expectEqual(@as(usize, 3), agent.get_stream(s2).?.component_count());
+}
+
+test "libnice parity: test-credentials" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    try agent.set_remote_credentials(stream_id, "ru", "rp");
+    try std.testing.expect(agent.get_stream(stream_id).?.remote_credentials != null);
+}
+
+test "libnice parity: test-trickle" {
+    var a = Agent.init(std.testing.allocator);
+    defer a.deinit();
+    var b = Agent.init(std.testing.allocator);
+    defer b.deinit();
+
+    const sa = try a.add_stream(1);
+    const sb = try b.add_stream(1);
+    const addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 140 }, .port = 5000 } };
+    try std.testing.expect(try a.add_local_candidate(sa, .{
+        .id = 1,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, addr),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = addr,
+    }));
+    try a.get_stream(sa).?.set_local_credentials("ua", "pa");
+    var desc = try a.build_local_description(std.testing.allocator, sa, null);
+    defer desc.deinit(std.testing.allocator);
+    const applied = try b.apply_remote_description(sb, .{ .credentials = desc.credentials, .candidates = desc.candidates });
+    try std.testing.expectEqual(@as(usize, 1), applied.candidates_added);
+}
+
+test "libnice parity: test-new-trickle" {
+    var a = Agent.init(std.testing.allocator);
+    defer a.deinit();
+    var b = Agent.init(std.testing.allocator);
+    defer b.deinit();
+
+    const sa = try a.add_stream(1);
+    const sb = try b.add_stream(1);
+    const addr: candidate.Address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 141 }, .port = 5001 } };
+    try std.testing.expect(try a.add_local_candidate(sa, .{
+        .id = 11,
+        .component_id = 1,
+        .candidate_type = .host,
+        .transport = .udp,
+        .foundation = candidate.compute_foundation(.udp, .host, addr),
+        .priority = candidate.compute_candidate_priority(.host, 10, 1),
+        .address = addr,
+    }));
+    try a.get_stream(sa).?.set_local_credentials("ua2", "pa2");
+    var desc = try a.build_local_description(std.testing.allocator, sa, null);
+    defer desc.deinit(std.testing.allocator);
+    const applied = try b.apply_remote_description(sb, .{ .credentials = desc.credentials, .candidates = desc.candidates });
+    try std.testing.expectEqual(@as(usize, 1), applied.candidates_added);
+}
+
+test "libnice parity: test-interfaces" {
+    var agent = Agent.init(std.testing.allocator);
+    defer agent.deinit();
+    const stream_id = try agent.add_stream(1);
+    const interfaces = [_]discovery.InterfaceAddress{.{ .address = .{ .ipv4 = .{ .ip = .{ 192, 0, 2, 30 }, .port = 0 } }, .local_preference = 7 }};
+    const components = [_]u16{1};
+    const gathered = try agent.gather_host_candidates(stream_id, &interfaces, &components, 1000, false);
+    try std.testing.expect(gathered.generated >= 1);
+}

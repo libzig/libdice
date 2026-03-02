@@ -99,3 +99,19 @@ test "bytestream dispatcher no-ops without hooks" {
     dispatcher.emit_closed(1, 1);
     try std.testing.expect(true);
 }
+
+test "libnice parity: test-bytestream-tcp" {
+    var dispatcher = BytestreamDispatcher.init(.opportunistic);
+    dispatcher.emit_ready(1, 1);
+    dispatcher.emit_data(1, 1, "abc");
+    dispatcher.emit_closed(1, 1);
+    try std.testing.expectEqual(BytestreamMode.opportunistic, dispatcher.mode);
+}
+
+test "libnice parity: test-gstreamer" {
+    var dispatcher = BytestreamDispatcher.init(.required);
+    dispatcher.emit_ready(2, 1);
+    dispatcher.emit_data(2, 1, "gst");
+    dispatcher.emit_closed(2, 1);
+    try std.testing.expectEqual(BytestreamMode.required, dispatcher.mode);
+}

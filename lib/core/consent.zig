@@ -142,3 +142,11 @@ test "consent tracker disabled mode remains inert" {
     try std.testing.expect(!tracker.due_probe(100000));
     try std.testing.expectError(error.NotArmed, tracker.on_probe_sent(10));
 }
+
+test "libnice parity: test-consent" {
+    var tracker = ConsentTracker.init(.{ .enabled = true, .interval_ms = 10, .response_timeout_ms = 5, .max_missed_probes = 0 });
+    tracker.arm(1, 0);
+    try tracker.on_probe_sent(10);
+    try std.testing.expect(tracker.on_tick(15));
+    try std.testing.expectEqual(ConsentState.failed, tracker.state);
+}
